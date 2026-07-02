@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>K12 空间申请 - 纯 JS</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="page">
+    <section class="topbar">
+      <div>
+        <h1>K12 空间申请</h1>
+        <p>纯 JS 本地解析 · 不连接后端 · 不请求外部接口</p>
+      </div>
+      <div id="status" class="status connected">纯前端模式</div>
+    </section>
+
+    <section class="workspace">
+      <article class="panel">
+        <div class="panel-title">
+          <h2>AT 信息</h2>
+          <button id="inspect-btn">提交查询</button>
+        </div>
+        <textarea id="access-token" class="token-box" spellcheck="false" placeholder="eyJ..."></textarea>
+        <div id="result-line" class="result-line">等待输入</div>
+        <div class="progress-title">查询过程</div>
+        <div id="progress-log" class="progress-log">等待提交</div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-title">
+          <h2>账号信息</h2>
+          <button id="reload-btn" class="inactive-btn" disabled>申请空间</button>
+        </div>
+        <textarea id="account-info" class="info-box" spellcheck="false" readonly></textarea>
+        <div class="field-title">空间ID</div>
+        <textarea id="workspace-id" class="workspace-id-box" spellcheck="false" placeholder="workspace_id">631e1603-06cf-4f0b-b79b-d09fbfcfe98d
+a65ebb2e-dd7c-4fdb-9a5d-6ccaf6ad00a3
+52fb9943-aa13-4959-92bc-fe5e81c9e7f0
+8064da55-e484-4ba0-a0bc-db05ee84462b
+885440cb-01f9-4927-b2da-c7734cde849d
+d3c40646-82b0-42a5-a9e6-01819e5f66b2
+a4ed7848-dc98-4510-b4f8-ee170aad52ce
+0c0a3db9-ada3-44c0-8a15-f39a24c903f0
+c4d1df5b-81cd-445d-a5ea-4131a0fbb9d2
+1a4f5089-cab2-4f46-8073-6c8bb13f6aff
+44a5d4e6-e463-4412-88f3-0c98290027b7</textarea>
+      </article>
+
+      <article class="panel">
+        <div class="panel-title">
+          <h2>操作日志</h2>
+          <button id="save-log-btn" class="inactive-btn" disabled>保存日志</button>
+        </div>
+        <textarea id="operator-log" class="log-input" spellcheck="false" placeholder="纯前端模式下日志只显示在当前页面"></textarea>
+      </article>
+    </section>
+  </main>
+  <script src="/static/js-only.js"></script>
+</body>
+</html>

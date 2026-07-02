@@ -1,0 +1,222 @@
+:root {
+  color-scheme: light;
+  --bg: #f5f7fb;
+  --surface: #ffffff;
+  --line: #d8dee9;
+  --text: #17202a;
+  --muted: #64748b;
+  --accent: #0f766e;
+  --accent-soft: #e0f2f1;
+  --warn: #b42318;
+  --busy: #7c3aed;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.page {
+  width: min(1180px, calc(100vw - 32px));
+  margin: 24px auto 48px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+h1, h2, p { margin: 0; }
+h1 { font-size: 28px; font-weight: 760; }
+h2 { font-size: 16px; font-weight: 720; }
+p { margin-top: 6px; color: var(--muted); }
+
+.status {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 9px 12px;
+  min-width: 150px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.status.connected { color: var(--accent); }
+.status.disconnected { color: var(--warn); }
+
+.workspace {
+  display: grid;
+  grid-template-columns: 1fr 1.05fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+}
+
+.panel:nth-child(3) {
+  grid-column: 1 / -1;
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+button {
+  border: 1px solid #0d9488;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 8px;
+  padding: 9px 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+button:hover { background: #115e59; }
+button:disabled { cursor: wait; opacity: 0.62; }
+button.running,
+button.inactive-btn,
+button.inactive-btn:hover,
+button.inactive-btn:disabled {
+  border-color: #94a3b8;
+  background: #94a3b8;
+  color: #f8fafc;
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+textarea {
+  display: block;
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfdff;
+  color: var(--text);
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  outline: none;
+}
+
+textarea:focus {
+  border-color: #14b8a6;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.token-box { min-height: 180px; }
+.info-box { min-height: 196px; }
+.workspace-id-box { min-height: 184px; }
+.log-input { min-height: 170px; }
+
+.result-line {
+  margin-top: 10px;
+  min-height: 22px;
+  color: var(--muted);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.result-line.ok { color: var(--accent); }
+.result-line.err { color: var(--warn); }
+.result-line.busy { color: var(--busy); }
+
+.progress-title,
+.field-title {
+  margin: 14px 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.progress-log {
+  min-height: 138px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 10px 12px;
+  color: #334155;
+  white-space: pre-wrap;
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.home-page {
+  max-width: 860px;
+}
+
+.home-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.home-button {
+  display: flex;
+  min-height: 126px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid #0d9488;
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 22px;
+  text-decoration: none;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+}
+
+.home-button:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.home-button span {
+  font-size: 20px;
+  font-weight: 760;
+}
+
+.home-button small {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+@media (max-width: 860px) {
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .home-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .panel:nth-child(3) {
+    grid-column: auto;
+  }
+
+  .status {
+    width: 100%;
+  }
+}

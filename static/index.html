@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>K12 工作台入口</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="page home-page">
+    <section class="topbar">
+      <div>
+        <h1>K12 工作台</h1>
+        <p>选择 WebSocket 后端查询版本，或纯浏览器 JS 解析版本。</p>
+      </div>
+    </section>
+
+    <section class="home-actions">
+      <a class="home-button" href="/html/websocket">
+        <span>WebSocket 版本</span>
+        <small>连接后端，查询账号接口并导出 JSON</small>
+      </a>
+      <a class="home-button secondary" href="/html/js">
+        <span>纯 JS 版本</span>
+        <small>仅在浏览器本地解析 AT，不连接后端</small>
+      </a>
+    </section>
+  </main>
+</body>
+</html>
