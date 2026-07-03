@@ -48,6 +48,12 @@ p { margin-top: 6px; color: var(--muted); }
   font-size: 14px;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .status.connected { color: var(--accent); }
 .status.disconnected { color: var(--warn); }
 
@@ -78,6 +84,14 @@ p { margin-top: 6px; color: var(--muted); }
   margin-bottom: 10px;
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 button {
   border: 1px solid #0d9488;
   background: var(--accent);
@@ -90,6 +104,15 @@ button {
 
 button:hover { background: #115e59; }
 button:disabled { cursor: wait; opacity: 0.62; }
+.secondary-btn {
+  border-color: var(--line);
+  background: #ffffff;
+  color: var(--text);
+}
+.secondary-btn:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
 button.running,
 button.inactive-btn,
 button.inactive-btn:hover,
@@ -99,6 +122,31 @@ button.inactive-btn:disabled {
   color: #f8fafc;
   cursor: not-allowed;
   opacity: 1;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.text-input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: #fbfdff;
+  color: var(--text);
+  font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  outline: none;
+}
+
+.text-input:focus {
+  border-color: #14b8a6;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 textarea {
@@ -161,6 +209,41 @@ textarea:focus {
   max-width: 860px;
 }
 
+.login-panel {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: end;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px;
+  margin-bottom: 14px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+}
+
+.login-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.login-buttons {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+}
+
+.login-panel .result-line,
+.risk-output {
+  grid-column: 1 / -1;
+}
+
+.risk-output {
+  min-height: 150px;
+  max-height: 260px;
+}
+
 .home-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -212,11 +295,43 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
+  .login-panel,
+  .login-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .login-buttons {
+    width: 100%;
+  }
+
+  .login-buttons button {
+    flex: 1;
+  }
+
   .panel:nth-child(3) {
     grid-column: auto;
   }
 
   .status {
+    width: 100%;
+  }
+
+  .topbar-actions {
+    width: 100%;
+  }
+
+  .topbar-actions .status {
+    flex: 1;
+    width: auto;
+  }
+
+  .panel-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .panel-actions,
+  .panel-actions button {
     width: 100%;
   }
 }

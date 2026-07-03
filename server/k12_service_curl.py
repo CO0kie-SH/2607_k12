@@ -5,14 +5,14 @@ import hashlib
 import json
 import logging
 import asyncio
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from tool.base_http_client import BaseHttpClient
-from tool.curl_cffi_client import CurlCffiHttpClient
+import aiohttp
 
 
 def utc_now() -> str:
@@ -59,7 +59,6 @@ class K12Service:
         proxy: str | None = None,
         timeout: float = 15.0,
         logger: logging.Logger | None = None,
-        http_client: BaseHttpClient | None = None,
     ) -> None:
         self.db_dir = db_dir
         self.log_dir = log_dir or db_dir
@@ -67,19 +66,27 @@ class K12Service:
         self.proxy = proxy or None
         self.timeout = timeout
         self.log = logger or logging.getLogger(__name__)
-        self.http = http_client or CurlCffiHttpClient(proxy=self.proxy, timeout=self.timeout, logger=self.log)
         self.db_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+
+    def _client_session(self, timeout: aiohttp.ClientTimeout) -> aiohttp.ClientSession:
+        return aiohttp.ClientSession(timeout=timeout, proxy=self.proxy, trust_env=False)
+
+    @staticmethod
+    def _is_js_challenge(text: str, content_type: str, status: int) -> bool:
+        if status != 403 or "text/html" not in content_type.lower():
+            return False
+        return "Enable JavaScript and cookies to continue" in text
+
+    @staticmethod
+    def _curl_quote(value: str) -> str:
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
     async def inspect_access_token(
         self,
         access_token: str,
         operator_log: str = "",
         progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
-        *,
-        expected_workspace_id: str = "",
-        accounts_retry_attempts: int = 1,
-        accounts_retry_delay: float = 1.0,
     ) -> dict[str, Any]:
         token = access_token.strip()
         if not token.startswith("eyJ"):
@@ -100,13 +107,7 @@ class K12Service:
                 "plan_type": decoded.get("plan_type", ""),
             },
         )
-        api_data = await self._query_account(
-            token,
-            progress=progress,
-            expected_workspace_id=expected_workspace_id,
-            accounts_retry_attempts=accounts_retry_attempts,
-            accounts_retry_delay=accounts_retry_delay,
-        )
+        api_data = await self._query_account(token, progress=progress)
 
         report = {
             "generated_at": utc_now(),
@@ -164,13 +165,12 @@ class K12Service:
         if not token.startswith("eyJ"):
             raise ValueError("AT 必须以 eyJ 开头")
 
-        ids = self._normalize_workspace_ids(workspace_ids)
+        ids = [workspace_id.strip() for workspace_id in workspace_ids if workspace_id.strip()]
         if not ids:
             raise ValueError("workspace_ids 不能为空")
 
         results: list[dict[str, Any]] = []
         accepted_workspace_id = ""
-        last_attempted_workspace_id = ""
         progress_log: list[str] = []
 
         async def apply_progress(payload: dict[str, Any]) -> None:
@@ -183,7 +183,6 @@ class K12Service:
         await self._progress(apply_progress, "apply_start", f"开始申请空间，共{len(ids)}个")
 
         for index, workspace_id in enumerate(ids, 1):
-            last_attempted_workspace_id = workspace_id
             short_id = self._short_workspace_id(workspace_id)
             await self._progress(
                 apply_progress,
@@ -256,33 +255,8 @@ class K12Service:
 
         success = bool(accepted_workspace_id)
         stopped_by = "first_success" if success else "exhausted"
-        refresh_expected_workspace_id = accepted_workspace_id or last_attempted_workspace_id
         await self._progress(apply_progress, "apply_refresh", "刷新账号信息中")
-        account_report = await self.inspect_access_token(
-            token,
-            "",
-            progress=apply_progress,
-            expected_workspace_id=refresh_expected_workspace_id,
-            accounts_retry_attempts=3 if refresh_expected_workspace_id else 1,
-            accounts_retry_delay=1.0,
-        )
-        if refresh_expected_workspace_id:
-            final_workspace_ids = account_report.get("report", {}).get("workspace_ids", [])
-            if refresh_expected_workspace_id in final_workspace_ids and not success:
-                accepted_workspace_id = refresh_expected_workspace_id
-                success = True
-                stopped_by = "confirmed_after_refresh"
-                for row in results:
-                    if row.get("workspace_id") == refresh_expected_workspace_id:
-                        row["confirmed_after_refresh"] = True
-                        row["status"] = "confirmed_after_refresh"
-                        break
-                await self._progress(
-                    apply_progress,
-                    "apply_confirmed_after_refresh",
-                    f"刷新后确认空间{self._short_workspace_id(refresh_expected_workspace_id)}已加入",
-                    {"workspace_id": refresh_expected_workspace_id},
-                )
+        account_report = await self.inspect_access_token(token, "", progress=apply_progress)
 
         await self._progress(
             apply_progress,
@@ -322,10 +296,6 @@ class K12Service:
         self,
         access_token: str,
         progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
-        *,
-        expected_workspace_id: str = "",
-        accounts_retry_attempts: int = 1,
-        accounts_retry_delay: float = 1.0,
     ) -> dict[str, Any]:
         headers = {
             "accept": "*/*",
@@ -341,94 +311,219 @@ class K12Service:
         ]
         for name, path, message in endpoints:
             url = f"{self.base_url}{path}"
-            retry_accounts = name == "accounts" and bool(expected_workspace_id)
-            max_attempts = max(1, accounts_retry_attempts if retry_accounts else 1)
-            for attempt in range(1, max_attempts + 1):
-                attempt_suffix = f" 第{attempt}/{max_attempts}次" if retry_accounts else ""
-                await self._progress(progress, f"query_{name}", f"{message}: {path}{attempt_suffix}", {"url": url, "attempt": attempt, "max_attempts": max_attempts})
-                endpoint_result = await self._request_json(url, headers)
-                result[name] = endpoint_result
-                status = endpoint_result.get("status")
-                content_type = endpoint_result.get("content_type", "")
-
-                expected_present = False
-                if retry_accounts:
-                    workspace_ids = self._extract_workspace_ids(endpoint_result)
-                    expected_present = expected_workspace_id in workspace_ids
-                    endpoint_result["expected_workspace_id"] = expected_workspace_id
-                    endpoint_result["expected_workspace_present"] = expected_present
-                    endpoint_result["accounts_query_attempt"] = attempt
-                    endpoint_result["accounts_query_max_attempts"] = max_attempts
-
-                if endpoint_result.get("ok"):
-                    if retry_accounts:
-                        short_id = self._short_workspace_id(expected_workspace_id)
-                        if expected_present:
-                            await self._progress(
-                                progress,
-                                f"query_{name}_done",
-                                f"得到接口信息: {path}，已包含申请空间{short_id}",
-                                {"status": status, "content_type": content_type, "attempt": attempt, "max_attempts": max_attempts},
-                            )
-                            break
-                        if attempt < max_attempts:
-                            await self._progress(
-                                progress,
-                                "query_accounts_retry",
-                                f"空间列表暂未包含{short_id}，1秒后重试({attempt}/{max_attempts})",
-                                {"workspace_id": expected_workspace_id, "attempt": attempt, "max_attempts": max_attempts},
-                            )
-                            await asyncio.sleep(accounts_retry_delay)
-                            continue
-                        await self._progress(
-                            progress,
-                            f"query_{name}_done",
-                            f"得到接口信息: {path}，仍未包含申请空间{short_id}",
-                            {"status": status, "content_type": content_type, "attempt": attempt, "max_attempts": max_attempts},
-                        )
-                        break
-
-                    await self._progress(
-                        progress,
-                        f"query_{name}_done",
-                        f"得到接口信息: {path}",
-                        {"status": status, "content_type": content_type},
-                    )
-                    break
-                if endpoint_result.get("error"):
-                    await self._progress(
-                        progress,
-                        f"query_{name}_error",
-                        f"接口查询失败: {path} {endpoint_result['error']}",
-                        {"error": endpoint_result["error"]},
-                    )
-                elif endpoint_result.get("json_error"):
-                    await self._progress(
-                        progress,
-                        f"query_{name}_non_json",
-                        f"接口返回非 JSON: {path} status={status}",
-                        {
-                            "status": status,
-                            "content_type": content_type,
-                            "text_preview": endpoint_result.get("text_preview", "")[:160],
-                        },
-                    )
-                else:
-                    await self._progress(
-                        progress,
-                        f"query_{name}_done",
-                        f"接口返回非 200: {path} status={status}",
-                        {
-                            "status": status,
-                            "content_type": content_type,
-                            "text_preview": endpoint_result.get("text_preview", "")[:160],
-                        },
-                    )
-                break
+            await self._progress(progress, f"query_{name}", f"{message}: {path}", {"url": url})
+            endpoint_result = await self._request_json(url, headers)
+            result[name] = endpoint_result
+            status = endpoint_result.get("status")
+            content_type = endpoint_result.get("content_type", "")
+            if endpoint_result.get("ok"):
+                await self._progress(
+                    progress,
+                    f"query_{name}_done",
+                    f"得到接口信息: {path}",
+                    {"status": status, "content_type": content_type},
+                )
+            elif endpoint_result.get("error"):
+                await self._progress(
+                    progress,
+                    f"query_{name}_error",
+                    f"接口查询失败: {path} {endpoint_result['error']}",
+                    {"error": endpoint_result["error"]},
+                )
+            elif endpoint_result.get("json_error"):
+                await self._progress(
+                    progress,
+                    f"query_{name}_non_json",
+                    f"接口返回非 JSON: {path} status={status}",
+                    {
+                        "status": status,
+                        "content_type": content_type,
+                        "text_preview": endpoint_result.get("text_preview", "")[:160],
+                    },
+                )
+            else:
+                await self._progress(
+                    progress,
+                    f"query_{name}_done",
+                    f"接口返回非 200: {path} status={status}",
+                    {
+                        "status": status,
+                        "content_type": content_type,
+                        "text_preview": endpoint_result.get("text_preview", "")[:160],
+                    },
+                )
         return result
 
     async def _request_json(self, url: str, headers: dict[str, str]) -> dict[str, Any]:
-        return await self.http.request("GET", url, headers, timeout=self.timeout, parse_json=True, preview_limit=500)
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        result = await self._aiohttp_request(
+            "GET",
+            url,
+            headers,
+            timeout,
+            parse_json=True,
+            preview_limit=500,
+        )
+        if result.get("js_challenge"):
+            return await self._curl_request(
+                "GET",
+                url,
+                headers,
+                timeout_seconds=self.timeout,
+                parse_json=True,
+                preview_limit=500,
+                fallback_from=result,
+            )
+        return result
+
+    async def _aiohttp_request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        timeout: aiohttp.ClientTimeout,
+        *,
+        parse_json: bool,
+        preview_limit: int,
+        data: bytes | None = None,
+    ) -> dict[str, Any]:
+        try:
+            self.log.info("k12 http %s url=%s proxy=%s", method.lower(), url, self.proxy or "-")
+            async with self._client_session(timeout) as session:
+                async with session.request(method, url, headers=headers, data=data) as resp:
+                    text = await resp.text()
+                    content_type = resp.headers.get("content-type", "")
+                    parsed: Any = None
+                    json_error = ""
+                    if parse_json and text:
+                        try:
+                            parsed = json.loads(text)
+                        except ValueError as exc:
+                            json_error = repr(exc)
+                    return {
+                        "status": resp.status,
+                        "ok": resp.status == 200 and (not parse_json or not json_error),
+                        "content_type": content_type,
+                        "text_length": len(text),
+                        "text_preview": text[:preview_limit],
+                        "json_error": json_error,
+                        "data": parsed,
+                        "proxy_used": self.proxy or "",
+                        "transport": "aiohttp",
+                        "js_challenge": self._is_js_challenge(text, content_type, resp.status),
+                    }
+        except Exception as exc:
+            return {"ok": False, "error": repr(exc), "proxy_used": self.proxy or "", "transport": "aiohttp"}
+
+    async def _curl_request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        *,
+        timeout_seconds: float,
+        parse_json: bool,
+        preview_limit: int,
+        fallback_from: dict[str, Any] | None = None,
+        data: bytes | None = None,
+    ) -> dict[str, Any]:
+        curl = shutil.which("curl.exe") or shutil.which("curl")
+        if not curl:
+            return {
+                "ok": False,
+                "error": "curl executable not found for JS challenge fallback",
+                "proxy_used": self.proxy or "",
+                "transport": "curl",
+            }
+
+        marker = "__K12_CURL_META__"
+        cmd = [
+            curl,
+            "-sS",
+            "--http1.1",
+            "--compressed",
+            "--location",
+            "--max-time",
+            str(max(1, int(timeout_seconds))),
+            "--output",
+            "-",
+            "--write-out",
+            f"\n{marker}%{{http_code}}|%{{content_type}}",
+            "--config",
+            "-",
+        ]
+        if self.proxy:
+            cmd.extend(["--proxy", self.proxy])
+        if method.upper() != "GET":
+            cmd.extend(["--request", method.upper(), "--data-raw", (data or b"").decode("utf-8", errors="ignore")])
+
+        config_lines = [f"url = {self._curl_quote(url)}"]
+        config_lines.extend(f"header = {self._curl_quote(f'{key}: {value}')}" for key, value in headers.items())
+        config = ("\n".join(config_lines) + "\n").encode("utf-8")
+        self.log.info("k12 http curl fallback method=%s url=%s proxy=%s", method.lower(), url, self.proxy or "-")
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(config), timeout=timeout_seconds + 5)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": repr(exc),
+                "proxy_used": self.proxy or "",
+                "transport": "curl",
+            }
+
+        output = stdout.decode("utf-8", errors="replace")
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+        if marker not in output:
+            return {
+                "ok": False,
+                "error": stderr_text or "curl response metadata missing",
+                "proxy_used": self.proxy or "",
+                "transport": "curl",
+                "text_preview": output[:preview_limit],
+            }
+
+        text, meta = output.rsplit(f"\n{marker}", 1)
+        status_text, _, content_type = meta.partition("|")
+        try:
+            status = int(status_text)
+        except ValueError:
+            status = 0
+
+        parsed: Any = None
+        json_error = ""
+        if parse_json and text:
+            try:
+                parsed = json.loads(text)
+            except ValueError as exc:
+                json_error = repr(exc)
+
+        result = {
+            "status": status,
+            "ok": status == 200 and (not parse_json or not json_error),
+            "content_type": content_type.strip(),
+            "text_length": len(text),
+            "text_preview": text[:preview_limit],
+            "json_error": json_error,
+            "data": parsed,
+            "proxy_used": self.proxy or "",
+            "transport": "curl",
+            "curl_stderr": stderr_text,
+        }
+        if fallback_from is not None:
+            result["fallback_from"] = {
+                "transport": fallback_from.get("transport"),
+                "status": fallback_from.get("status"),
+                "content_type": fallback_from.get("content_type"),
+                "js_challenge": fallback_from.get("js_challenge"),
+            }
+        return result
 
     async def _post_empty(self, url: str, access_token: str) -> dict[str, Any]:
         headers = {
@@ -438,25 +533,34 @@ class K12Service:
             "oai-device-id": str(uuid.uuid4()),
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/135.0.0.0 Safari/537.36",
         }
-        return await self.http.request("POST", url, headers, timeout=3, parse_json=False, preview_limit=300, data=b"")
+        timeout = aiohttp.ClientTimeout(total=3)
+        result = await self._aiohttp_request(
+            "POST",
+            url,
+            headers,
+            timeout,
+            parse_json=False,
+            preview_limit=300,
+            data=b"",
+        )
+        if result.get("js_challenge"):
+            return await self._curl_request(
+                "POST",
+                url,
+                headers,
+                timeout_seconds=3,
+                parse_json=False,
+                preview_limit=300,
+                fallback_from=result,
+                data=b"",
+            )
+        return result
 
     @staticmethod
     def _short_workspace_id(workspace_id: str) -> str:
         if len(workspace_id) <= 12:
             return workspace_id
         return f"{workspace_id[:4]}...{workspace_id[-3:]}"
-
-    @staticmethod
-    def _normalize_workspace_ids(workspace_ids: list[str]) -> list[str]:
-        ids: list[str] = []
-        seen: set[str] = set()
-        for value in workspace_ids:
-            for line in str(value).splitlines():
-                workspace_id = line.split(",", 1)[0].strip()
-                if workspace_id and workspace_id not in seen:
-                    ids.append(workspace_id)
-                    seen.add(workspace_id)
-        return ids
 
     @staticmethod
     async def _progress(

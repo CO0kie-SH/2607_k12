@@ -1,189 +1,220 @@
 # K12 空间申请 Web 工作台
 
-一个基于 `aiohttp` 的 K12 空间申请 Web 工作台，支持 AccessToken 本地提交、后端代理查询账号信息、WebSocket JSON-RPC 实时进度推送、账号 JSON 报告导出、空间 ID 批量申请和操作日志落盘。
+当前封版版本：`26.7.3B`  
+最后更新：`2026-07-03`
 
-当前主功能是 `/html/websocket` WebSocket 后端版页面；纯前端版 `/html/js` 保留为实验入口，不作为当前主流程。项目保留原 Gate 框架中的 HTTP、WebSocket、JSON-RPC、SQLite、日志和兼容模块，但默认不启动 Gate 行情流。
+这是一个基于 `aiohttp` 的 K12 空间申请 Web 工作台。主流程通过登录页进入 WebSocket 后端版页面，后端使用 `curl_cffi` 经过代理查询账号信息、申请空间、导出 JSON 报告并保存操作日志。
+
+纯前端页面 `/html/js` 保留为实验入口；当前主流程是 `/html/websocket`。
+
+## 本版说明
+
+`26.7.3B` 是当前封版版本，主线功能为：账号登录、一次性工作台会话、AT 查询、按邮箱后缀申请空间、重复申请前端拦截、申请后空间列表重试确认、操作日志落盘，以及两个浏览器辅助按钮。
+
+本版“打开网页”用于打开 ChatGPT session 地址；“退出空间”只打开 ChatGPT 账号设置入口并记录当前 workspace ID，不调用后端退出空间 API。
 
 ## 核心能力
-- 使用 `aiohttp` 提供 HTTP 页面、静态资源和 WebSocket 服务
-- 首页 `/` 提供两个入口：WebSocket 后端版和纯 JS 实验版
-- WebSocket 后端版路径为 `/html/websocket`
-- 支持输入 `eyJ...` 开头的 AccessToken
-- 后端解码 JWT payload，提取邮箱、手机号、账号 ID、用户 ID 和 plan type
-- 后端通过默认代理 `http://127.0.0.1:7897` 查询账号接口
-- 查询 `/backend-api/me` 获取账号基础信息
-- 查询 `/backend-api/accounts` 获取空间列表和空间详情
-- 导出账号查询报告到 `db/k12_<account_id>.json`
-- 记录 AT 查询摘要到 `db/k12_at_records.jsonl`
-- 提取 workspace ID、空间类型、空间名和用户角色
-- 账号信息框显示 workspace 数量、ID 列表和空间详情
-- 操作日志使用浏览器本地时间，精确到秒
-- 查询日志自动脱敏 AccessToken，只保留 `eyJ******xxxxx`
-- “提交查询”运行中置灰，完成、失败或超时后恢复
-- “申请空间”初始禁用，账号查询成功后启用
-- “申请空间”读取页面空间 ID 列表并传给后端
-- 后端按 workspace ID 顺序逐个执行 `request -> accept`
-- 每次只处理一个 workspace ID
-- `request` 成功后等待 `1.5s` 再执行 `accept`
-- 首个 `accept` 成功后停止后续申请
-- 申请完成后重新查询账号信息并导出最新 JSON
-- 查询进度和申请进度通过 `/ws` 实时推送到前端
-- 全程使用 JSON-RPC 2.0 传输
-- 每条 JSON-RPC 响应和通知带 `event_id`，便于复盘
-- 操作日志保存到 `log/k12_operator.log`
-- 服务运行日志保存到 `log/k12_server.log`
-- 使用 rotating log，避免服务日志无限增长
-- 保留旧 Gate 行情模块和早期采集脚本，方便兼容和回退测试
+
+- 首页 `/` 提供账号名、密码输入框，以及“查询”“登录”按钮。
+- 登录账号存储在 SQLite：`db/auth.sqlite3`。
+- 密码使用 PBKDF2-HMAC-SHA256 加盐哈希，不明文保存。
+- 账号包含 `usable_count` 可用次数字段。
+- “查询”按钮校验账号密码后，前端显示 `remote`、近 60 秒请求次数 RPM 和账号可用次数。
+- 完整 headers 只记录到后端服务日志，不返回前端。
+- 请求事件写入 `db/auth.sqlite3`，当前按 `remote` 维度计算近 60 秒 RPM，后端同时保留 `X-Forwarded-For`、`X-Real-IP`、`Forwarded`、`User-Agent` 等风控维度。
+- 登录成功后写入 `HttpOnly` Cookie：`k12_session`，并返回一次性工作台进入令牌。
+- `/html/websocket` 必须携带未消费的一次性进入令牌；刷新工作台页面会丢弃当前会话并回到首页重新登录。
+- 未登录访问 `/html/websocket` 会跳转回首页。
+- 未登录连接 `/ws` 会被后端直接拒绝。
+- WebSocket 版支持提交 AccessToken，后端查询 `/backend-api/me` 和 `/backend-api/accounts`。
+- 查询报告导出到 `db/k12_<account_id>.json`。
+- AT 查询摘要追加到 `db/k12_at_records.jsonl`。
+- 操作日志保存到 `log/k12_operator.log`。
+- 服务运行日志保存到 `log/k12_server.log`，使用 rotating log。
+- 出站 HTTP 客户端统一封装在 `tool/`，主流程默认使用 `tool/curl_cffi_client.py`。
+- 保留 `curl.exe` 兜底版本：`server/k12_service_curl.py`、`try_join_first_curl.py`。
+- 空间 ID 支持 `workspace_id,plan_type,email_suffix,available` 行格式。
+- 前端按 AT 邮箱后缀匹配可用空间后才申请。
+- 前端会检查当前账号已有 workspace ID，匹配空间已存在时不向后端提交申请。
+- “打开网页”按钮会打开 `https://chatgpt.com/api/auth/session`，用于浏览器侧检查 ChatGPT session。
+- “退出空间”按钮会基于当前查询到的 workspace 列表记录操作日志，并打开 ChatGPT 账号设置入口；当前不调用后端退出空间 API。
+- 后端会兜底规整 workspace 输入，只取 CSV 第一列 UUID。
+- 申请流程按顺序执行 `request -> accept`，首个 accept 成功后停止。
+- HTTP 2xx 都按成功处理，避免 `204 No Content` 被误判失败。
 
 ## 项目结构
+
 ```text
-k12_web/
-├── main.py                         # 主入口，默认由 server.app 启动 aiohttp
+2607_k12/
+├── main.py                         # aiohttp 服务入口
 ├── requirements.txt                # Python 依赖
 ├── README.md                       # 项目说明
-├── k12.csv                         # K12 空间 ID 数据源/历史输入
-├── team.csv                        # 测试用 AT 数据文件，注意不要外传
-├── try_join_first.py               # 早期命令行 request -> accept 申请脚本
-├── server/
-│   ├── __init__.py
-│   ├── app.py                      # aiohttp HTTP/API/WS 服务端和 JSON-RPC 分发
-│   ├── k12_service.py              # K12 查询、申请、导出、日志保存
-│   ├── jsonrpc.py                  # JSON-RPC 与 event_id 工具
-│   ├── gate_client.py              # 旧 Gate WS client，兼容保留
-│   ├── storage.py                  # 旧 SQLite 存储，兼容保留
-│   └── stream_manager.py           # 旧 Gate stream 管理，兼容保留
-├── static/
-│   ├── index.html                  # 首页入口
-│   ├── websocket.html              # K12 WebSocket 后端版页面
-│   ├── websocket.js                # WebSocket 后端版前端逻辑
-│   ├── js.html                     # 纯 JS 实验版页面
-│   ├── js-only.js                  # 纯 JS 实验版逻辑
-│   ├── control.html                # 兼容控制页面
-│   ├── control.js                  # 兼容控制页面逻辑
-│   ├── app.js                      # 旧入口逻辑，兼容保留
-│   └── style.css                   # 页面样式
 ├── doc/
-│   └── API.md                      # API / JSON-RPC 文档
+│   └── API.md                      # HTTP / WebSocket API 文档
+├── server/
+│   ├── app.py                      # HTTP 路由、登录接口、WebSocket 和 JSON-RPC 分发
+│   ├── auth_service.py             # SQLite 账号、密码、session 和风控计数
+│   ├── k12_service.py              # K12 查询、空间申请、报告导出、日志保存
+│   ├── k12_service_curl.py         # curl.exe 兜底版，默认不启用
+│   └── jsonrpc.py                  # JSON-RPC 响应、错误、通知和 event_id 工具
+├── static/
+│   ├── index.html                  # 登录首页
+│   ├── index.js                    # 登录/查询前端逻辑
+│   ├── websocket.html              # WebSocket 后端版主页面
+│   ├── websocket.js                # WebSocket 后端版交互逻辑
+│   ├── js.html                     # 纯前端实验页
+│   ├── js-only.js                  # 纯前端实验逻辑
+│   └── style.css                   # 页面样式
+├── tool/
+│   ├── base_http_client.py         # HTTP client 统一结果封装
+│   ├── curl_cffi_client.py         # 当前主流程 HTTP client
+│   ├── curl_exe_client.py          # curl.exe 兼容 client
+│   ├── aiohttp_client.py           # aiohttp 兼容 client
+│   └── requests_client.py          # requests 历史兼容 client
 ├── db/
-│   ├── market.sqlite3              # 旧 SQLite 数据库，兼容保留
-│   ├── k12_<account_id>.json       # K12 账号查询报告
-│   ├── k12_at_records.jsonl        # AT 查询记录
-│   └── k12_operator.log            # 历史遗留操作日志，新版本不再写入
-├── log/
-│   ├── k12_server.log              # K12 服务运行日志
-│   ├── k12_operator.log            # 当前页面操作日志
-│   └── server.log                  # 旧日志文件，兼容保留
-└── scripts/
-    ├── read_btcusdt_1m.py          # 旧 Gate CSV 采集脚本
-    └── read_btcusdt_1m_sqlite.py   # 旧 Gate 单 SQLite 采集脚本
+│   ├── auth.sqlite3                # 登录账号、session、可用次数
+│   ├── k12_<account_id>.json       # K12 查询报告
+│   └── k12_at_records.jsonl        # AT 查询摘要
+└── log/
+    ├── k12_server.log              # 服务日志
+    └── k12_operator.log            # 页面操作日志
 ```
 
 ## 环境要求
+
 - Windows / PowerShell
-- Python 3.12，当前使用 `D:\0Code2\py312\python.exe`
-- 依赖：`aiohttp`、`requests`
+- Python 3.12，当前环境：`D:\0Code2\py312\python.exe`
+- 依赖：`aiohttp>=3.9`、`curl_cffi>=0.15`
 - 可选：Node.js，用于检查前端 JS 语法
 - 默认代理：`http://127.0.0.1:7897`
 
 安装依赖：
+
 ```powershell
-cd D:\PycharmProjects\k12_web
+cd D:\PycharmProjects\0github\2607_k12
 & 'D:\0Code2\py312\python.exe' -m pip install -r requirements.txt
 ```
 
 ## 运行方式
+
 默认运行：
+
 ```powershell
-cd D:\PycharmProjects\k12_web
+cd D:\PycharmProjects\0github\2607_k12
 & 'D:\0Code2\py312\python.exe' main.py --host 127.0.0.1 --port 8088
 ```
 
-默认参数：
-```text
---host 0.0.0.0
---port 8088
---db db/market.sqlite3
---db-dir db
---log-dir log
---k12-base-url https://chatgpt.com
---k12-proxy http://127.0.0.1:7897
-```
-
 指定代理：
+
 ```powershell
 & 'D:\0Code2\py312\python.exe' main.py --host 127.0.0.1 --port 8088 --k12-proxy http://127.0.0.1:7897
 ```
 
 不使用代理：
+
 ```powershell
 & 'D:\0Code2\py312\python.exe' main.py --host 127.0.0.1 --port 8088 --k12-proxy ''
 ```
 
-启动旧 Gate 行情客户端：
+## 登录账号
+
+首次启动时，如果 `db/auth.sqlite3` 中没有账号，会自动创建默认账号：
+
+```text
+账号：admin
+密码：admin123456
+可用次数：100
+```
+
+启动时可覆盖默认账号配置：
+
 ```powershell
-& 'D:\0Code2\py312\python.exe' main.py --host 127.0.0.1 --port 8088 --start-gate
+& 'D:\0Code2\py312\python.exe' main.py `
+  --auth-default-user admin `
+  --auth-default-password "your-password" `
+  --auth-default-uses 100
+```
+
+也可使用环境变量：
+
+```text
+K12_AUTH_USER
+K12_AUTH_PASSWORD
+K12_AUTH_USES
+```
+
+注意：默认账号只会在账号表为空时创建。数据库已有账号后，修改启动参数不会覆盖旧账号。
+
+## 命令行参数
+
+```text
+--host                    监听地址，默认 0.0.0.0
+--port                    监听端口，默认 8088
+--db-dir                  K12 JSON 报告和 AT 记录目录，默认 db
+--log-dir                 日志目录，默认 log
+--auth-db                 登录 SQLite 数据库路径，默认 db/auth.sqlite3
+--auth-default-user        首次初始化默认账号名，默认 admin
+--auth-default-password    首次初始化默认密码，默认 admin123456
+--auth-default-uses        首次初始化默认可用次数，默认 100
+--k12-base-url             K12 请求基础 URL，默认 https://chatgpt.com
+--k12-proxy                K12 后端请求代理，默认 http://127.0.0.1:7897
 ```
 
 ## 页面入口
-首页入口：
+
 ```text
-http://127.0.0.1:8088/
+首页/登录页：http://127.0.0.1:8088/
+WebSocket 后端版：http://127.0.0.1:8088/html/websocket
+纯 JS 实验版：http://127.0.0.1:8088/html/js
 ```
 
-K12 WebSocket 后端版：
+部署到局域网或服务器时，将 `127.0.0.1` 替换为实际访问地址。
+
+## 登录和访问控制
+
+登录链路：
+
 ```text
-http://127.0.0.1:8088/html/websocket
+Browser /
+  ├─ POST /api/auth/query  -> 查询账号并记录 remote 请求次数
+  └─ POST /api/auth/login  -> 登录成功后写入 HttpOnly Cookie，并返回 entry_token
+
+Browser /html/websocket?entry=<entry_token>
+  ├─ 未登录、缺少 entry、entry 已消费：302 跳回 /
+  └─ 已登录且 entry 未消费：消费 entry，返回 WebSocket 后端版页面
+
+Browser /ws
+  ├─ 未登录：401 login required
+  └─ 已登录：建立 WebSocket，收到 server.hello；每次 RPC 前重新校验 session
 ```
 
-纯 JS 实验版：
+当前版本只实现登录门槛、remote 近 60 秒 RPM 统计和可用次数查询；尚未在每次申请成功后扣减可用次数。后续限流可基于 `auth_risk_fingerprints` 和 `auth_risk_events` 中的多维指纹数据接入。
+
+## WebSocket 版使用流程
+
+1. 打开 `/`，输入账号名和密码。
+2. 点击“查询”，查看当前 `remote`、近 60 秒 RPM 和账号可用次数。
+3. 点击“登录”，携带一次性 `entry_token` 进入 `/html/websocket`。
+4. 可点击“打开网页”，打开 `https://chatgpt.com/api/auth/session` 检查浏览器侧 ChatGPT session。
+5. 输入 `eyJ...` 开头的 AccessToken。
+6. 点击“提交查询”，后端查询账号信息并导出报告。
+7. 查询成功后点击“申请空间”。
+8. 前端按 AT 邮箱后缀过滤空间 ID，只提交匹配项。
+9. 前端排除当前账号已存在的 workspace ID；如果匹配项全部已存在，不提交后端申请。
+10. 后端逐个执行 `request -> accept`，成功一个即停止。
+11. 申请后刷新空间列表；如果申请 ID 暂未出现，延迟 1 秒后重试，最多请求 3 次。
+12. 如果 `request` 表面失败但刷新后空间已出现，流程会标记为 `confirmed_after_refresh`。
+13. 可点击“退出空间”，打开 ChatGPT 账号设置入口，并在操作日志中记录当前账号 workspace ID。
+
+默认空间 ID 列表：
+
 ```text
-http://127.0.0.1:8088/html/js
+255de4a6-96a4-430a-b660-358954424e79,k12,outlook.com,true
+ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true
 ```
 
-兼容控制页：
-```text
-http://127.0.0.1:8088/control
-```
+## 数据流
 
-局域网访问时，将 `127.0.0.1` 替换为服务器 IP。
-
-## 命令行参数
-```powershell
-& 'D:\0Code2\py312\python.exe' main.py [--host HOST] [--port PORT] [--db DB_PATH] [--db-dir DB_DIR] [--log-dir LOG_DIR] [--k12-base-url URL] [--k12-proxy PROXY] [--start-gate]
-```
-
-参数说明：
-- `--host`：监听地址，默认 `0.0.0.0`
-- `--port`：监听端口，默认 `8088`
-- `--db`：SQLite 数据库路径，默认 `db/market.sqlite3`
-- `--db-dir`：K12 JSON 报告和 AT 记录目录，默认 `db`
-- `--log-dir`：日志目录，默认 `log`
-- `--k12-base-url`：K12 请求基础 URL，默认 `https://chatgpt.com`
-- `--k12-proxy`：K12 后端请求代理，默认 `http://127.0.0.1:7897`
-- `--start-gate`：启动旧 Gate 行情客户端，默认不启动
-
-## WebSocket 版页面说明
-WebSocket 版页面路径：
-```text
-/html/websocket
-```
-
-页面分为三块：
-- AT 信息：输入 AccessToken，点击“提交查询”
-- 账号信息：显示账号摘要、workspace 数量、workspace ID、空间类型和空间名
-- 操作日志：显示查询、申请和保存过程
-
-按钮状态：
-- “提交查询”：运行中置灰，完成、失败或超时后恢复
-- “申请空间”：初始禁用；查询成功后启用；申请中置灰；完成、失败或超时后恢复
-- “保存日志”：保持禁用，当前由流程自动保存
-
-空间 ID 默认列表在：
-```text
-static/websocket.html
-```
-
-## 数据流说明
 ```text
 Browser /html/websocket
         │
@@ -192,269 +223,67 @@ Browser /html/websocket
         │                                  ▼
         └────────────── /ws ───────> aiohttp server
                                            │
-                                           ├─ requests + proxy -> /backend-api/me
-                                           ├─ requests + proxy -> /backend-api/accounts
-                                           ├─ requests + proxy -> /invites/request
-                                           ├─ requests + proxy -> /invites/accept
+                                           ├─ curl_cffi + proxy -> /backend-api/me
+                                           ├─ curl_cffi + proxy -> /backend-api/accounts
+                                           ├─ curl_cffi + proxy -> /invites/request
+                                           ├─ curl_cffi + proxy -> /invites/accept
                                            ├─ export JSON -> db/
                                            └─ save log -> log/
 ```
 
-职责边界：
-- `static/websocket.js`：只负责页面交互、按钮状态、日志展示和 JSON-RPC 调用
-- `server/app.py`：只负责 HTTP 路由、WebSocket 生命周期和 JSON-RPC 方法分发
-- `server/k12_service.py`：负责 AT 解码、账号查询、空间申请、报告导出和日志落盘
-- `server/jsonrpc.py`：统一生成 JSON-RPC 响应、错误、通知和 `event_id`
-- `db/`：保存结构化查询数据
-- `log/`：保存运行日志和操作日志
+## API 摘要
 
-## JSON-RPC 说明
-所有 WebSocket 消息使用 JSON-RPC 2.0。
+HTTP API：
 
-请求示例：
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "k12.inspect_at",
-  "params": {
-    "access_token": "eyJ...",
-    "operator_log": "[2026-07-02 18:48:24]查询eyJ******xxxxx的账号邮箱为xxx@xxx"
-  }
-}
-```
-
-响应示例：
-```json
-{
-  "jsonrpc": "2.0",
-  "event_id": "1783005834935-result-000004",
-  "id": 1,
-  "result": {}
-}
-```
-
-通知示例：
-```json
-{
-  "jsonrpc": "2.0",
-  "event_id": "1783005834935-k12_progress-000004",
-  "method": "k12.progress",
-  "params": {
-    "event_id": "1783005834935-k12_progress-000004",
-    "stage": "query_accounts",
-    "message": "查询账号空间信息中: /backend-api/accounts"
-  }
-}
-```
-
-`event_id` 格式：
 ```text
-unixtime_ms-事件类型-递增计数
+GET  /                     登录首页
+GET  /html/websocket       WebSocket 后端版页面，需登录
+GET  /html/js              纯前端实验页
+GET  /api/status           服务状态，需登录
+GET  /api/auth/me          当前登录态
+POST /api/auth/query       查询账号并返回 remote、RPM 和可用次数
+POST /api/auth/login       登录并写入 session cookie，返回 entry_token
+POST /api/auth/logout      退出登录
+GET  /ws                   WebSocket JSON-RPC，需登录
 ```
 
-用途：
-- 复盘事件顺序
-- 对齐前端进度
-- 对齐服务端日志
-- 排查请求、响应和通知是否丢失
+WebSocket JSON-RPC：
 
-## WebSocket JSON-RPC 方法
-地址：
 ```text
-/ws
+k12.inspect_at             查询 AT 账号信息并导出报告
+k12.apply_workspaces       按顺序申请空间，成功一个即停，刷新列表最多重试 3 次
+k12.save_log               保存页面操作日志
+k12.latest                 读取最新 K12 查询报告
+server.status              查询服务状态
 ```
 
-### `k12.inspect_at`
-提交 AT，后端解码、查询账号接口并导出 JSON。
+详细协议见：`doc/API.md`。
 
-请求：
-```json
-{"jsonrpc":"2.0","id":1,"method":"k12.inspect_at","params":{"access_token":"eyJ...","operator_log":"..."}}
-```
+## 风险说明
 
-后端动作：
-- 校验 AT 必须以 `eyJ` 开头
-- 解码 JWT payload
-- 查询 `/backend-api/me`
-- 查询 `/backend-api/accounts`
-- 提取 `workspace_ids`
-- 提取 `workspace_details`
-- 导出 `db/k12_<account_id>.json`
-- 追加 `db/k12_at_records.jsonl`
-- 保存操作日志到 `log/k12_operator.log`
-
-### `k12.apply_workspaces`
-提交 AT 和空间 ID 列表，后端按顺序申请空间。
-
-请求：
-```json
-{"jsonrpc":"2.0","id":2,"method":"k12.apply_workspaces","params":{"access_token":"eyJ...","workspace_ids":["631e1603-06cf-4f0b-b79b-d09fbfcfe98d"],"operator_log":"..."}}
-```
-
-返回示例：
-```json
-{
-  "success": true,
-  "stopped_by": "first_success",
-  "accepted_workspace_id": "a65ebb2e-dd7c-4fdb-9a5d-6ccaf6ad00a3",
-  "results": [
-    {
-      "workspace_id": "a65ebb2e-dd7c-4fdb-9a5d-6ccaf6ad00a3",
-      "request_ok": true,
-      "accept_ok": true,
-      "status": "accepted"
-    }
-  ],
-  "account_report": {}
-}
-```
-
-### `k12.save_log`
-保存页面操作日志。
-
-请求：
-```json
-{"jsonrpc":"2.0","id":3,"method":"k12.save_log","params":{"text":"[2026-07-02 18:48:24]..."}}
-```
-
-默认输出：
-```text
-log/k12_operator.log
-```
-
-### `k12.latest`
-读取 `db/` 中最新的 K12 查询报告。
-
-请求：
-```json
-{"jsonrpc":"2.0","id":4,"method":"k12.latest","params":{}}
-```
-
-### `server.status`
-查询 server 状态。
-
-请求：
-```json
-{"jsonrpc":"2.0","id":5,"method":"server.status","params":{}}
-```
-
-## 后端主动推送事件
-### `server.hello`
-前端连接 `/ws` 后立即推送：
-- streams
-- stream_status
-- offline
-- k12_proxy
-- k12_latest
-- counts
-- latest
-- recent
-
-### `k12.progress`
-查询 AT 时推送阶段进度，例如：
-- 收到 AT，开始处理
-- 解析 AT 中
-- 得到 AT 账号信息
-- 查询账号基础信息中
-- 得到接口信息
-- 查询账号空间信息中
-- 导出查询 JSON 中
-- 查询流程完成
-
-### `k12.report`
-查询完成后推送账号报告。
-
-### `k12.apply_progress`
-申请空间时推送阶段进度，例如：
-- 开始申请空间，共 N 个
-- 申请 xxxx...xxx request中
-- 申请 xxxx...xxx request成功
-- 申请 xxxx...xxx accept中
-- 申请 xxxx...xxx 成功，停止后续申请
-- 刷新账号信息中
-- 申请空间流程完成
-
-### `k12.log`
-保存操作日志后推送保存结果。
-
-## HTTP API
-### `GET /`
-返回首页入口页面。
-
-### `GET /html/websocket`
-返回 K12 WebSocket 后端版页面。
-
-### `GET /html/js`
-返回纯 JS 实验版页面。
-
-### `GET /control`
-返回兼容控制页面。
-
-### `GET /api/status`
-返回服务状态、代理配置、最新 K12 报告摘要和旧 stream 状态。
-
-### `GET /api/kline/recent?contract=BTC_USDT&interval=15m&limit=60`
-旧 Gate 兼容 API，返回近期已落地 K 线。
-
-### `GET /api/kline/latest?contract=BTC_USDT&interval=15m`
-旧 Gate 兼容 API，返回最新未落地 K 线。
-
-详细说明见：
-```text
-doc/API.md
-```
-
-## 空间申请流程
-前端一次传入完整空间 ID 列表，后端按顺序逐个处理。
-
-每个 workspace ID 的请求顺序：
-```text
-POST /backend-api/accounts/{workspace_id}/invites/request
-等待 1.5s
-POST /backend-api/accounts/{workspace_id}/invites/accept
-```
-
-停止规则：
-- `accept_ok=true` 时停止后续申请
-- 如果全部失败，返回 `stopped_by=exhausted`
-- 如果成功一个，返回 `stopped_by=first_success`
-
-申请成功后：
-- 等待 2 秒
-- 重新查询 `/backend-api/me`
-- 重新查询 `/backend-api/accounts`
-- 重新导出账号 JSON
-- 保存最终操作日志
-
-## 日志文案
-查询成功后，页面操作日志包含：
-```text
-[YYYY-MM-DD HH:mm:ss]查询eyJ******xxxxx的账号邮箱为xxx@xxx
-[YYYY-MM-DD HH:mm:ss]xxx@xxx邮箱当前工作区为[id1, id2]
-[YYYY-MM-DD HH:mm:ss]其中id1空间的类型为:workspace，空间名为xxx，请检查邮箱或者刷新主页查看该空间
-[YYYY-MM-DD HH:mm:ss]其中id2为个人空间
-```
-
-申请空间时，页面操作日志追加：
-```text
-[YYYY-MM-DD HH:mm:ss]开始申请空间，共11个
-[YYYY-MM-DD HH:mm:ss]申请631e...98d request中
-[YYYY-MM-DD HH:mm:ss]申请631e...98d request失败
-[YYYY-MM-DD HH:mm:ss]申请a65e...0a3 request成功
-[YYYY-MM-DD HH:mm:ss]申请a65e...0a3成功，停止后续申请
-```
+- 当前“已存在空间不重复申请”只在前端执行。
+- 后端 `k12.apply_workspaces` 暂不校验申请 ID 是否已存在于当前账号。
+- 如果绕过前端直接调用 WebSocket RPC，仍可能重复提交已有 workspace ID。
+- 生产环境后续建议在后端申请前先查询当前 workspace 列表并做同样拦截。
+- 当前“退出空间”按钮只打开网页入口并记录日志，不调用后端退出空间 API。
+- 如果后续要自动退出空间，需要先确认官方接口、权限、请求方法和幂等规则，再接入后端校验。
 
 ## 数据文件
-K12 查询报告目录：
-```text
-db/
-```
 
-### `k12_<account_id>.json`
-记录一次账号查询报告。
+### `db/auth.sqlite3`
 
-核心字段：
+登录功能数据库。核心表：
+
+- `auth_users`：账号、密码盐、密码哈希、可用次数、启用状态、最后登录时间。
+- `auth_sessions`：session token hash、一次性 entry token hash、账号、过期时间、最近访问时间、登录 headers 快照。
+- `auth_risk_environments`：风控环境分组，后续可把多个指纹归并到同一环境。
+- `auth_risk_fingerprints`：风控指纹累计计数，当前记录 remote、转发 IP、真实 IP、Forwarded 和 User-Agent 等维度。
+- `auth_risk_events`：请求事件表，用于计算近 60 秒 RPM。
+
+### `db/k12_<account_id>.json`
+
+每次查询导出的 K12 账号报告。核心字段：
+
 - `generated_at`
 - `access_token_sha256`
 - `access_token_preview`
@@ -465,144 +294,109 @@ db/
 - `workspace_count`
 - `report_path`
 
-### `k12_at_records.jsonl`
-记录 AT 查询摘要。
+### `db/k12_at_records.jsonl`
 
-核心字段：
-- `recorded_at`
-- `access_token_sha256`
-- `access_token_preview`
-- `account_id`
-- `email`
-- `phone`
-- `plan_type`
-- `report_path`
+AT 查询摘要记录。
 
-### `market.sqlite3`
-旧 Gate 兼容 SQLite 数据库，当前 K12 主流程不依赖它。
+### `log/k12_operator.log`
 
-## 日志说明
-日志目录：
-```text
-log/
-```
+页面操作日志。
 
-当前操作日志：
-```text
-log/k12_operator.log
-```
+### `log/k12_server.log`
 
-当前服务日志：
-```text
-log/k12_server.log
-```
+服务运行日志。
 
-日志内容包括：
-- server 启动和关闭
-- 前端 WS 连接/断开
-- JSON-RPC 广播事件
-- AT 查询阶段
-- 空间申请阶段
-- 报告导出路径
-- 操作日志保存路径
-- 错误堆栈
+## 验证记录
 
-历史说明：
-- `db/k12_operator.log` 是早期版本的操作日志输出位置
-- 当前版本 `26.7.2A` 起，操作日志写入 `log/k12_operator.log`
+封版前已完成以下验证：
 
-## 早期脚本和兼容模块说明
-项目保留早期 K12 命令行脚本：
-
-### K12 快速加入脚本
-```powershell
-& 'D:\0Code2\py312\python.exe' try_join_first.py --at "eyJ..."
-```
-
-说明：
-- 读取 `k12.csv`
-- 按 `request -> accept` 流程尝试加入空间
-- 成功一个即停止
-- 当前推荐使用 WebSocket 页面，不再优先使用该脚本
-
-项目也保留旧 Gate 测试脚本：
-
-### CSV 采集脚本
-```powershell
-& 'D:\0Code2\py312\python.exe' scripts\read_btcusdt_1m.py
-```
-
-### 单 SQLite 采集脚本
-```powershell
-& 'D:\0Code2\py312\python.exe' scripts\read_btcusdt_1m_sqlite.py
-```
-
-说明：这两个脚本主要用于旧 Gate K 线推送、`window_closed` 和 SQLite 结构验证，当前 K12 工作台主流程不依赖它们。
-
-## 运行验证记录
-已完成以下验证：
-- 验证 `GET /` 返回首页入口
-- 验证 `GET /html/websocket` 返回 K12 WebSocket 后端版页面
-- 验证 `GET /html/js` 返回纯 JS 实验版页面
-- 验证 `/ws` 连接后收到 `server.hello`
-- 验证 `k12.inspect_at` 使用 JSON-RPC 2.0 请求和响应
-- 验证 `k12.inspect_at` 可成功查询 `/backend-api/me`
-- 验证 `k12.inspect_at` 可成功查询 `/backend-api/accounts`
-- 验证账号信息框显示 workspace 数量和空间详情
-- 验证查询报告导出到 `db/k12_<account_id>.json`
-- 验证报告中包含 `workspace_ids` 和 `workspace_details`
-- 验证操作日志保存到 `log/k12_operator.log`
-- 验证 `k12.apply_workspaces` 使用 JSON-RPC 2.0 请求和响应
-- 验证申请空间按 workspace ID 顺序逐个处理
-- 验证首个 accept 成功后停止后续申请
-- 验证申请进度通过 `k12.apply_progress` 推送
-- 验证前端“提交查询”运行中置灰，完成后恢复
-- 验证前端“申请空间”查询成功后启用，申请中置灰，完成后恢复
-- 验证 `node --check static/websocket.js` 通过
-- 验证 `python -m compileall server main.py` 通过
-- 验证文档中的操作日志路径已从 `db/` 调整为 `log/`
+- `node --check static/index.js`
+- `node --check static/websocket.js`
+- `python -B -m py_compile server/app.py server/auth_service.py server/k12_service.py tool/base_http_client.py tool/curl_cffi_client.py main.py`
+- 未登录访问 `/html/websocket` 返回 `302 /?session=expired`
+- 未登录连接 `/ws` 返回 `401`
+- `/api/auth/query` 不返回 headers，只返回 `remote`、近 60 秒 RPM 和可用次数
+- `/api/auth/login` 可写入登录态并返回一次性 `entry_token`
+- 登录后携带未消费的 `entry_token` 访问 `/html/websocket` 返回 `200`
+- 重复访问或刷新同一个 `/html/websocket?entry=...` 会删除 session 并返回首页
+- 登录后连接 `/ws` 收到 `server.hello`
+- 申请空间路径使用 `curl_cffi`
+- 完整 CSV 空间行会规整为纯 UUID 后再拼接申请 URL
+- HTTP `202/204` 会按成功处理，`403` 仍按失败处理
 
 ## 版本
-当前版本：`26.7.2A`
-最后更新：`2026-07-02`
+
+当前版本：`26.7.3B`  
+封版日期：`2026-07-03`
 
 ## 更新日志
-### 26.7.2A (2026-07-02)
-- 新增：K12 空间申请 Web 工作台主题
-- 新增：首页 `/`，提供 WebSocket 后端版和纯 JS 实验版入口
-- 新增：WebSocket 后端版页面 `/html/websocket`
-- 新增：纯 JS 实验版页面 `/html/js`
-- 新增：AT 输入框、账号信息框、空间 ID 输入框和操作日志框
-- 新增：`k12.inspect_at` JSON-RPC 方法
-- 新增：AT JWT payload 本地解码逻辑
-- 新增：后端代理查询 `/backend-api/me`
-- 新增：后端代理查询 `/backend-api/accounts`
-- 新增：账号查询阶段 `k12.progress` 通知
-- 新增：账号报告 `k12.report` 通知
-- 新增：账号 JSON 报告导出到 `db/k12_<account_id>.json`
-- 新增：AT 查询记录追加到 `db/k12_at_records.jsonl`
-- 新增：workspace ID 提取
-- 新增：workspace 详情提取，包括空间类型、空间名和角色
-- 新增：账号信息框显示 workspace 数量、ID 和详情
-- 新增：查询日志脱敏 AccessToken，格式为 `eyJ******xxxxx`
-- 新增：浏览器本地时间日志，精确到秒
-- 新增：空间详情日志文案
-- 调整：个人空间日志简化为“其中 xxx 为个人空间”
-- 新增：`k12.apply_workspaces` JSON-RPC 方法
-- 新增：申请空间按钮，查询成功后启用
-- 新增：申请空间时前端传入完整空间 ID 列表
-- 新增：后端按列表顺序逐个执行 `request -> accept`
-- 新增：`request` 成功后等待 `1.5s` 再 `accept`
-- 新增：首个 `accept` 成功后停止后续申请
-- 新增：申请进度 `k12.apply_progress` 通知
-- 新增：申请完成后重新查询账号信息并导出 JSON
-- 新增：WebSocket RPC 超时保护
-- 调整：WebSocket heartbeat 调整为 `120s`
-- 调整：所有新增 WebSocket 请求统一使用 JSON-RPC 2.0
-- 调整：后端响应统一使用 `jsonrpc.result()` / `jsonrpc.error()`
-- 调整：后端主动推送统一使用 `jsonrpc.notification()`
-- 调整：默认代理设置为 `http://127.0.0.1:7897`
-- 调整：操作日志从 `db/k12_operator.log` 迁移到 `log/k12_operator.log`
-- 调整：服务日志命名为 `log/k12_server.log`
-- 保留：旧 Gate 行情模块作为兼容代码，默认不启动
-- 文档：按 `2606_GATE` 项目 README 格式重写当前项目文档
+
+### 26.7.3B (2026-07-03)
+
+- 新增：WebSocket 工作台“打开网页”按钮，位置在“提交查询”左侧。
+- 调整：“打开网页”目标地址为 `https://chatgpt.com/api/auth/session`。
+- 新增：WebSocket 工作台“退出空间”按钮，位置在“申请空间”右侧。
+- 新增：“退出空间”会检查当前查询结果中的 workspace ID，写入操作日志，并打开 ChatGPT 账号设置入口。
+- 说明：“退出空间”当前不调用后端退出空间 API，避免使用未验证接口造成误操作。
+- 调整：工作台按钮组样式，移动端按钮自动换行。
+- 调整：首页登录响应缺少 `entry_token` 时，提示用户重启后端并确认前后端版本一致。
+- 验证：`node --check static/index.js`、`node --check static/websocket.js`、`python -B -m py_compile server/app.py server/auth_service.py server/k12_service.py tool/base_http_client.py tool/curl_cffi_client.py main.py`。
+
+### 26.7.3A (2026-07-03)
+
+- 新增：首页登录表单，包含账号名和密码框。
+- 新增：首页“查询”按钮，用于显示 `remote`、近 60 秒 RPM 和可用次数。
+- 新增：首页“登录”按钮，登录成功后跳转到 WebSocket 后端版页面。
+- 新增：工作台一次性 `entry_token`，刷新或重复访问工作台页面会删除当前 session 并回首页重新登录。
+- 新增：`server/auth_service.py`，封装 SQLite 账号、密码、session 和风控计数逻辑。
+- 新增：SQLite 数据库 `db/auth.sqlite3`。
+- 新增：`auth_users` 表，保存账号、加盐密码哈希、可用次数和启用状态。
+- 新增：`auth_sessions` 表，保存登录 session、一次性 entry token、过期时间、最近访问时间和 headers 快照。
+- 新增：`auth_risk_environments`、`auth_risk_fingerprints` 和 `auth_risk_events` 表，保存多维风控指纹并计算近 60 秒 RPM。
+- 调整：`/api/auth/query` 和 `/api/auth/login` 不再向前端返回 headers，headers 只写入服务端日志。
+- 修复：申请空间后的账号列表刷新过快时，最多重试 3 次 `/backend-api/accounts`；若刷新后确认空间已加入，标记为 `confirmed_after_refresh`。
+- 新增：前端申请前检查当前账号已有 workspace ID，已存在则不提交后端申请。
+- 文档：记录“重复申请拦截仅在前端，后端暂不校验”的风险点。
+- 新增：默认账号初始化逻辑，账号表为空时创建 `admin / admin123456 / 100`。
+- 新增：`--auth-db`、`--auth-default-user`、`--auth-default-password`、`--auth-default-uses` 启动参数。
+- 新增：`K12_AUTH_USER`、`K12_AUTH_PASSWORD`、`K12_AUTH_USES` 环境变量支持。
+- 新增：`GET /api/auth/me`、`POST /api/auth/query`、`POST /api/auth/login`、`POST /api/auth/logout`。
+- 新增：未登录访问 `/html/websocket` 时跳转回首页。
+- 新增：未登录建立 `/ws` 时后端返回 `401 login required`。
+- 修复：`/api/status` 改为必须登录，避免未登录泄露最新 K12 报告摘要。
+- 新增：WebSocket 页面退出登录按钮。
+- 调整：`aiohttp` 日志 handler 在服务 cleanup 时显式释放，避免 Windows 下日志文件占用。
+- 调整：SQLite 连接显式 commit/rollback/close，避免数据库文件句柄占用。
+- 文档：重写 README 和 API 文档，记录当前封版功能和验证结果。
+
+### 26.7.2B (2026-07-03)
+
+- 新增：出站 HTTP 客户端统一封装到 `tool/`。
+- 新增：`BaseHttpClient`、`RequestsHttpClient`、`AiohttpHttpClient`、`CurlExeHttpClient`、`CurlCffiHttpClient`。
+- 调整：主流程默认使用 `curl_cffi`。
+- 保留：`curl.exe` 兜底版 `server/k12_service_curl.py` 和 `try_join_first_curl.py`。
+- 调整：`requirements.txt` 增加 `curl_cffi>=0.15`。
+
+### 26.7.2A (2026-07-03)
+
+- 新增：默认空间 ID 改为两行 CSV：
+  - `255de4a6-96a4-430a-b660-358954424e79,k12,outlook.com,true`
+  - `ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true`
+- 新增：前端按 AT 邮箱后缀匹配空间 ID 后才申请。
+- 新增：后端 `_normalize_workspace_ids()`，兼容旧前端或手动 RPC 传入完整 CSV 行。
+- 调整：前端脚本增加 query version，降低浏览器缓存旧 JS 的影响。
+- 修复：申请 URL 错误拼入 `,k12,outlook.com,true` 的问题。
+- 修复：HTTP 2xx 统一判定成功，避免 `204 No Content` 被误判失败。
+
+### 26.7.1A (2026-07-02)
+
+- 新增：K12 空间申请 Web 工作台主题。
+- 新增：首页 `/`、WebSocket 后端版 `/html/websocket`、纯 JS 实验版 `/html/js`。
+- 新增：AccessToken 输入、账号信息展示、空间 ID 输入和操作日志。
+- 新增：`k12.inspect_at` JSON-RPC 方法。
+- 新增：`k12.apply_workspaces` JSON-RPC 方法。
+- 新增：账号查询报告导出到 `db/k12_<account_id>.json`。
+- 新增：AT 查询摘要追加到 `db/k12_at_records.jsonl`。
+- 新增：查询进度、申请进度和日志保存通知。
+- 调整：操作日志写入 `log/k12_operator.log`。
+- 调整：服务日志写入 `log/k12_server.log`。

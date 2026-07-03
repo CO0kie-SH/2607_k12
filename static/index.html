@@ -11,8 +11,28 @@
     <section class="topbar">
       <div>
         <h1>K12 工作台</h1>
-        <p>选择 WebSocket 后端查询版本，或纯浏览器 JS 解析版本。</p>
+        <p>先登录后使用 WebSocket 后端查询版本。</p>
       </div>
+      <div id="auth-status" class="status disconnected">未登录</div>
+    </section>
+
+    <section class="login-panel">
+      <div class="login-fields">
+        <label>
+          <span>账号名</span>
+          <input id="login-username" class="text-input" autocomplete="username" placeholder="admin" />
+        </label>
+        <label>
+          <span>密码</span>
+          <input id="login-password" class="text-input" type="password" autocomplete="current-password" placeholder="请输入密码" />
+        </label>
+      </div>
+      <div class="login-buttons">
+        <button id="query-account-btn" type="button">查询</button>
+        <button id="login-btn" type="button">登录</button>
+      </div>
+      <div id="auth-result" class="result-line">等待输入账号</div>
+      <textarea id="risk-output" class="risk-output" spellcheck="false" readonly placeholder="查询后显示 remote、RPM 和可用次数"></textarea>
     </section>
 
     <section class="home-actions">
@@ -26,5 +46,6 @@
       </a>
     </section>
   </main>
+  <script src="/static/index.js?v=260703-entry-session-2"></script>
 </body>
 </html>

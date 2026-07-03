@@ -1,4 +1,5 @@
-const state = { rpcId: 1, pending: new Map(), ws: null, latest: null, accessToken: '' };
+const state = { rpcId: 1, pending: new Map(), ws: null, latest: null, accessToken: '', profile: null };
+let sessionEnding = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -14,6 +15,46 @@ function setResult(text, kind = 'idle') {
   const el = $('result-line');
   el.textContent = text;
   el.className = `result-line ${kind}`;
+}
+
+function closeCurrentWebSocket() {
+  if (!state.ws || state.ws.readyState > WebSocket.OPEN) return;
+  state.ws.close(1000, 'session ended');
+}
+
+function sendLogoutBeacon() {
+  if (sessionEnding) return;
+  sessionEnding = true;
+  closeCurrentWebSocket();
+  try {
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon('/api/auth/logout', new Blob([''], { type: 'text/plain' }));
+      return;
+    }
+  } catch {
+    // keepalive fetch below is the fallback path.
+  }
+  fetch('/api/auth/logout', {
+    method: 'POST',
+    credentials: 'same-origin',
+    keepalive: true,
+  }).catch(() => {});
+}
+
+async function endSessionAndReturnHome(reason = '会话已结束') {
+  if (sessionEnding) {
+    location.replace('/?session=expired');
+    return;
+  }
+  sessionEnding = true;
+  setStatus(reason, false);
+  setApplyEnabled(false);
+  closeCurrentWebSocket();
+  try {
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+  } finally {
+    location.replace('/?session=expired');
+  }
 }
 
 function setAccountInfo(payload) {
@@ -52,6 +93,11 @@ function decodeTokenProfile(accessToken) {
 
 function accountLabel(profile) {
   return profile.email || profile.phone || profile.accountId || '未知账号';
+}
+
+function emailDomain(email) {
+  const parts = String(email || '').toLowerCase().split('@');
+  return parts.length === 2 ? parts[1].trim() : '';
 }
 
 function browserTime() {
@@ -121,6 +167,28 @@ function appendOperatorLog(text) {
   el.scrollTop = el.scrollHeight;
 }
 
+function openExternalPage(url) {
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+function openChatGptPage() {
+  appendOperatorLog('打开 ChatGPT session 网页');
+  openExternalPage('https://chatgpt.com/api/auth/session');
+}
+
+function leaveSpacePage() {
+  const ids = Array.from(currentWorkspaceIds());
+  if (!ids.length) {
+    const message = '请先提交查询并成功获取当前账号空间信息';
+    appendOperatorLog(message);
+    setResult(message, 'err');
+    return;
+  }
+  appendOperatorLog(`准备退出空间，当前账号空间: ${ids.join(', ')}`);
+  setResult('已打开账号设置页，请在网页中确认退出空间', 'ok');
+  openExternalPage('https://chatgpt.com/#settings/Account');
+}
+
 function appendProgress(payload) {
   const time = payload.time ? new Date(payload.time).toLocaleTimeString() : new Date().toLocaleTimeString();
   const line = `[${time}] ${payload.message || payload.stage || ''}`;
@@ -144,11 +212,42 @@ function rpc(method, params = {}, timeoutMs = 120000) {
   });
 }
 
-function workspaceIdsFromInput() {
+function workspaceEntriesFromInput() {
   return $('workspace-id').value
     .split(/\r?\n/)
     .map(item => item.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map(line => {
+      const parts = line.split(',').map(item => item.trim());
+      return {
+        id: parts[0] || '',
+        planType: parts[1] || '',
+        emailSuffix: (parts[2] || '').toLowerCase(),
+        available: parts[3] ? parts[3].toLowerCase() === 'true' : true,
+        raw: line,
+      };
+    });
+}
+
+function workspaceIdsForProfile(profile) {
+  const domain = emailDomain(profile?.email || '');
+  const entries = workspaceEntriesFromInput();
+  const matched = entries.filter(item => {
+    if (!item.id || !item.available) return false;
+    if (!item.emailSuffix) return true;
+    return Boolean(domain) && domain === item.emailSuffix;
+  });
+  return {
+    domain,
+    skipped: entries.length - matched.length,
+    ids: matched.map(item => item.id),
+  };
+}
+
+function currentWorkspaceIds() {
+  const report = state.latest?.report || {};
+  const ids = Array.isArray(report.workspace_ids) ? report.workspace_ids : [];
+  return new Set(ids.filter(Boolean));
 }
 
 async function submitAt() {
@@ -170,6 +269,7 @@ async function submitAt() {
   try {
     const result = await rpc('k12.inspect_at', { access_token: accessToken, operator_log: queryLog });
     state.accessToken = accessToken;
+    state.profile = profile;
     setAccountInfo(result);
     setApplyEnabled(true);
     const finalLog = [
@@ -193,22 +293,47 @@ async function applyWorkspaces() {
     setResult('请先提交查询并成功获取账号信息', 'err');
     return;
   }
-  const workspaceIds = workspaceIdsFromInput();
+  const profile = state.profile || decodeTokenProfile(state.accessToken);
+  const { domain, skipped, ids: workspaceIds } = workspaceIdsForProfile(profile);
   if (!workspaceIds.length) {
-    setResult('空间ID不能为空', 'err');
+    const message = domain
+      ? `当前邮箱后缀 ${domain} 不匹配任何可申请空间`
+      : '当前 AT 未解析到邮箱，无法按邮箱后缀匹配空间';
+    appendOperatorLog(message);
+    setResult(message, 'err');
+    return;
+  }
+
+  const existingWorkspaceIds = currentWorkspaceIds();
+  const existingMatchedIds = workspaceIds.filter(id => existingWorkspaceIds.has(id));
+  const applyWorkspaceIds = workspaceIds.filter(id => !existingWorkspaceIds.has(id));
+
+  if (existingMatchedIds.length) {
+    appendOperatorLog(`跳过已存在空间${existingMatchedIds.join(', ')}`);
+  }
+
+  if (!applyWorkspaceIds.length) {
+    const message = existingMatchedIds.length
+      ? '匹配的可申请空间已存在于当前账号，不再提交后端申请'
+      : domain
+        ? `当前邮箱后缀 ${domain} 不匹配任何可申请空间`
+        : '当前 AT 未解析到邮箱，无法按邮箱后缀匹配空间';
+    appendOperatorLog(message);
+    setResult(message, existingMatchedIds.length ? 'ok' : 'err');
     return;
   }
 
   const btn = $('reload-btn');
   btn.disabled = true;
   btn.classList.add('running');
-  appendOperatorLog(`开始申请空间，共${workspaceIds.length}个`);
+  appendOperatorLog(`邮箱后缀${domain || '-'}匹配可申请空间${workspaceIds.length}个${skipped ? `，跳过${skipped}个` : ''}${existingMatchedIds.length ? `，已存在${existingMatchedIds.length}个` : ''}`);
+  appendOperatorLog(`开始申请空间，共${applyWorkspaceIds.length}个`);
   setResult('申请空间中...', 'busy');
 
   try {
     const result = await rpc('k12.apply_workspaces', {
       access_token: state.accessToken,
-      workspace_ids: workspaceIds,
+      workspace_ids: applyWorkspaceIds,
       operator_log: $('operator-log').value,
     }, 180000);
     if (result.account_report) setAccountInfo(result.account_report);
@@ -232,6 +357,10 @@ async function applyWorkspaces() {
   }
 }
 
+async function logout() {
+  await endSessionAndReturnHome('已退出登录');
+}
+
 function connectWs() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -240,7 +369,15 @@ function connectWs() {
   ws.onopen = async () => {
     setStatus('WebSocket 已连接', true);
   };
-  ws.onclose = () => {
+  ws.onclose = (event) => {
+    if (sessionEnding) return;
+    if (event.code === 1008 || event.code === 1006) {
+      setStatus('未登录或会话已过期', false);
+      if (!sessionEnding) {
+        window.setTimeout(() => location.replace('/?session=expired'), 500);
+      }
+      return;
+    }
     setStatus('连接断开，重连中...', false);
     setTimeout(connectWs, 1500);
   };
@@ -267,5 +404,9 @@ function connectWs() {
 
 $('inspect-btn').addEventListener('click', submitAt);
 $('reload-btn').addEventListener('click', applyWorkspaces);
+$('open-web-btn').addEventListener('click', openChatGptPage);
+$('leave-space-btn').addEventListener('click', leaveSpacePage);
+$('logout-btn').addEventListener('click', logout);
+window.addEventListener('pagehide', sendLogoutBeacon);
 
 connectWs();

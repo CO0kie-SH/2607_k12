@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from server.k12_service import K12Service
+from server.k12_service_curl import K12Service
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BASE = "https://chatgpt.com"
