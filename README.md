@@ -1,17 +1,20 @@
 # K12 空间申请 Web 工作台
 
-当前封版版本：`26.7.3B`  
-最后更新：`2026-07-03`
+当前版本：`26.7.4B`
+最后更新：`2026-07-04`
 
 这是一个基于 `aiohttp` 的 K12 空间申请 Web 工作台。主流程通过登录页进入 WebSocket 后端版页面，后端使用 `curl_cffi` 经过代理查询账号信息、申请空间、导出 JSON 报告并保存操作日志。
 
 纯前端页面 `/html/js` 保留为实验入口；当前主流程是 `/html/websocket`。
+AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 
 ## 本版说明
 
-`26.7.3B` 是当前封版版本，主线功能为：账号登录、一次性工作台会话、AT 查询、按邮箱后缀申请空间、重复申请前端拦截、申请后空间列表重试确认、操作日志落盘，以及两个浏览器辅助按钮。
+`26.7.4B` 是当前版本，主线功能为：账号登录、一次性工作台会话、WebSocket Origin 白名单、AT 查询、按邮箱后缀申请空间、重复申请前端拦截、申请后空间列表重试确认、操作日志落盘，以及两个浏览器辅助按钮。
 
 本版“打开网页”用于打开 ChatGPT session 地址；“退出空间”只打开 ChatGPT 账号设置入口并记录当前 workspace ID，不调用后端退出空间 API。
+
+本版将纯 JS 页面调整为只做 AT JWT payload 本地解析，不再由静态页面发起对外请求，避免浏览器跨域问题。workspace 停用状态目前没有可靠字段可判断，已在文档中记录边界。
 
 ## 核心能力
 
@@ -25,7 +28,8 @@
 - 登录成功后写入 `HttpOnly` Cookie：`k12_session`，并返回一次性工作台进入令牌。
 - `/html/websocket` 必须携带未消费的一次性进入令牌；刷新工作台页面会丢弃当前会话并回到首页重新登录。
 - 未登录访问 `/html/websocket` 会跳转回首页。
-- 未登录连接 `/ws` 会被后端直接拒绝。
+- `/ws` 会校验 WebSocket `Origin` 白名单，未登录或 Origin 不匹配都会被后端拒绝。
+- 纯 JS 页面 `/html/js` 只解析 AT 自带 claims，不发起对外请求，不查询 workspace。
 - WebSocket 版支持提交 AccessToken，后端查询 `/backend-api/me` 和 `/backend-api/accounts`。
 - 查询报告导出到 `db/k12_<account_id>.json`。
 - AT 查询摘要追加到 `db/k12_at_records.jsonl`。
@@ -50,7 +54,8 @@
 ├── requirements.txt                # Python 依赖
 ├── README.md                       # 项目说明
 ├── doc/
-│   └── API.md                      # HTTP / WebSocket API 文档
+│   ├── API.md                      # HTTP / WebSocket API 文档
+│   └── AT_RT_GUIDE.md              # AT / RT、纯 JS 页面和空间状态边界说明
 ├── server/
 │   ├── app.py                      # HTTP 路由、登录接口、WebSocket 和 JSON-RPC 分发
 │   ├── auth_service.py             # SQLite 账号、密码、session 和风控计数
@@ -141,6 +146,7 @@ cd D:\PycharmProjects\0github\2607_k12
 K12_AUTH_USER
 K12_AUTH_PASSWORD
 K12_AUTH_USES
+K12_ALLOWED_ORIGINS
 ```
 
 注意：默认账号只会在账号表为空时创建。数据库已有账号后，修改启动参数不会覆盖旧账号。
@@ -158,6 +164,24 @@ K12_AUTH_USES
 --auth-default-uses        首次初始化默认可用次数，默认 100
 --k12-base-url             K12 请求基础 URL，默认 https://chatgpt.com
 --k12-proxy                K12 后端请求代理，默认 http://127.0.0.1:7897
+--allowed-origins          WebSocket Origin 白名单，多个 Origin 用英文逗号分隔
+```
+
+WebSocket Origin 白名单默认只允许本地开发地址：
+
+```text
+http://127.0.0.1:8088
+http://localhost:8088
+http://[::1]:8088
+```
+
+公网部署时必须显式配置公网访问域名：
+
+```powershell
+& 'D:\0Code2\py312\python.exe' main.py `
+  --host 127.0.0.1 `
+  --port 8088 `
+  --allowed-origins "https://your-domain.example"
 ```
 
 ## 页面入口
@@ -184,6 +208,7 @@ Browser /html/websocket?entry=<entry_token>
   └─ 已登录且 entry 未消费：消费 entry，返回 WebSocket 后端版页面
 
 Browser /ws
+  ├─ Origin 不在白名单：403 forbidden origin
   ├─ 未登录：401 login required
   └─ 已登录：建立 WebSocket，收到 server.hello；每次 RPC 前重新校验 session
 ```
@@ -209,8 +234,19 @@ Browser /ws
 默认空间 ID 列表：
 
 ```text
-255de4a6-96a4-430a-b660-358954424e79,k12,outlook.com,true
-ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true
+b49cd6d8-b52d-4c21-93d7-89cc19b5e18e,k12,gmail.com,true,
+eb6642e8-b4a6-4652-9c18-67099f2781cc,k12,gmail.com,true,
+83bec9de-395a-44e6-9a30-189508c22b99,k12,gmail.com,true,
+a0a16bc9-e1b1-45f0-b269-812b53f60121,k12,gmail.com,true,
+5e4c9b31-1b4e-4887-839b-607597928d7c,k12,gmail.com,true,
+ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true,
+631e1603-06cf-4f0b-b79b-d09fbfcfe98d,k12,outlook.com,true,
+a65ebb2e-dd7c-4fdb-9a5d-6ccaf6ad00a3,k12,outlook.com,true,
+52fb9943-aa13-4959-92bc-fe5e81c9e7f0,k12,outlook.com,true,
+d3c40646-82b0-42a5-a9e6-01819e5f66b2,k12,outlook.com,true,
+a4ed7848-dc98-4510-b4f8-ee170aad52ce,k12,outlook.com,true,
+c4d1df5b-81cd-445d-a5ea-4131a0fbb9d2,k12,outlook.com,true,
+44a5d4e6-e463-4412-88f3-0c98290027b7,k12,outlook.com,true,
 ```
 
 ## 数据流
@@ -244,7 +280,7 @@ GET  /api/auth/me          当前登录态
 POST /api/auth/query       查询账号并返回 remote、RPM 和可用次数
 POST /api/auth/login       登录并写入 session cookie，返回 entry_token
 POST /api/auth/logout      退出登录
-GET  /ws                   WebSocket JSON-RPC，需登录
+GET  /ws                   WebSocket JSON-RPC，需登录且 Origin 在白名单
 ```
 
 WebSocket JSON-RPC：
@@ -267,6 +303,11 @@ server.status              查询服务状态
 - 生产环境后续建议在后端申请前先查询当前 workspace 列表并做同样拦截。
 - 当前“退出空间”按钮只打开网页入口并记录日志，不调用后端退出空间 API。
 - 如果后续要自动退出空间，需要先确认官方接口、权限、请求方法和幂等规则，再接入后端校验。
+- WebSocket 已增加 Origin 白名单；公网部署时必须把真实 HTTPS 域名写入 `--allowed-origins` 或 `K12_ALLOWED_ORIGINS`。
+- 纯 JS 版本中的 AT 本地解析不需要联网，当前静态页面不再浏览器直连外部接口。
+- 当前 `/backend-api/accounts` 返回字段不足以可靠判断 workspace 是否停用。
+- `processor=stripe` 只能作为订阅/付费处理器线索，不能证明当前账号本人正在付费，也不能证明空间当前 active。
+- `eligible_for_auto_reactivation=true` 不能直接等同于“已停用”或“可用”。
 
 ## 数据文件
 
@@ -311,6 +352,7 @@ AT 查询摘要记录。
 封版前已完成以下验证：
 
 - `node --check static/index.js`
+- `node --check static/js-only.js`
 - `node --check static/websocket.js`
 - `python -B -m py_compile server/app.py server/auth_service.py server/k12_service.py tool/base_http_client.py tool/curl_cffi_client.py main.py`
 - 未登录访问 `/html/websocket` 返回 `302 /?session=expired`
@@ -319,17 +361,37 @@ AT 查询摘要记录。
 - `/api/auth/login` 可写入登录态并返回一次性 `entry_token`
 - 登录后携带未消费的 `entry_token` 访问 `/html/websocket` 返回 `200`
 - 重复访问或刷新同一个 `/html/websocket?entry=...` 会删除 session 并返回首页
+- `/ws` 缺失 `Origin` 或 Origin 不在白名单时返回 `403`
+- `/ws` 携带白名单 Origin 且已登录时收到 `server.hello`
 - 登录后连接 `/ws` 收到 `server.hello`
+- 纯 JS 页面不再包含浏览器 `fetch` 外部接口请求，只做 AT JWT payload 本地解析
 - 申请空间路径使用 `curl_cffi`
 - 完整 CSV 空间行会规整为纯 UUID 后再拼接申请 URL
 - HTTP `202/204` 会按成功处理，`403` 仍按失败处理
 
 ## 版本
 
-当前版本：`26.7.3B`  
-封版日期：`2026-07-03`
+当前版本：`26.7.4B`
+更新日期：`2026-07-04`
 
 ## 更新日志
+
+### 26.7.4B (2026-07-04)
+
+- 调整：纯 JS 页面 `/html/js` 只做 AT JWT payload 本地解析，不再请求外部接口。
+- 修复：纯 JS 页面文案从“浏览器直连查询”改为“不联网”，并更新静态脚本缓存版本号。
+- 文档：补充 workspace 停用状态无法可靠判断的原因和字段边界。
+- 说明：当前 `/backend-api/accounts` 返回字段不足以判断停用、订阅和账单状态；后续需要接入更明确的官方状态接口或稳定字段。
+
+### 26.7.4A (2026-07-04)
+
+- 新增：`/ws` WebSocket 握手 Origin 白名单校验。
+- 新增：`--allowed-origins` 启动参数，支持英文逗号分隔多个允许的 Origin。
+- 新增：`K12_ALLOWED_ORIGINS` 环境变量。
+- 默认：只允许 `http://127.0.0.1:8088`、`http://localhost:8088`、`http://[::1]:8088` 三个本地开发 Origin。
+- 调整：WebSocket 非法 Origin 返回 `403 forbidden origin`，不会进入登录态校验和 WebSocket 建连。
+- 调整：服务启动日志输出当前生效的 `allowed_origins`。
+- 验证：缺失 Origin、非法 Origin 均返回 `403`；白名单 Origin 可正常建立 WebSocket 并收到 `server.hello`。
 
 ### 26.7.3B (2026-07-03)
 

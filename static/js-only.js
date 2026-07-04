@@ -61,42 +61,9 @@ function formatUnixTime(sec) {
   return sec ? new Date(sec * 1000).toLocaleString() : '-';
 }
 
-function endpointLine(path, result) {
-  if (!result) return `${path}: 未查询`;
-  if (result.error) return `${path}: ${result.error}`;
-  const suffix = `status=${result.status} content-type=${result.contentType || '-'}`;
-  if (result.jsonError) return `${path}: ${suffix} json_error=${result.jsonError}`;
-  return `${path}: ${suffix}`;
-}
-
-function extractWorkspaceIds(accountsResult) {
-  const ids = new Set();
-  const data = accountsResult?.data;
-
-  function walk(value, depth = 0) {
-    if (depth > 6 || value == null) return;
-    if (Array.isArray(value)) {
-      value.forEach(item => walk(item, depth + 1));
-      return;
-    }
-    if (typeof value === 'object') {
-      Object.entries(value).forEach(([key, item]) => {
-        if (key === 'id' && typeof item === 'string' && item.length === 36 && item.split('-').length === 5) {
-          ids.add(item);
-        }
-        walk(item, depth + 1);
-      });
-    }
-  }
-
-  walk(data);
-  return Array.from(ids).sort();
-}
-
-function renderAccountInfo(profile, query = {}) {
-  const workspaceIds = extractWorkspaceIds(query.accounts);
+function renderAccountInfo(profile) {
   $('account-info').value = [
-    `模式: 纯前端浏览器查询`,
+    `模式: 纯前端本地解析`,
     `邮箱: ${profile.email || '-'}`,
     `手机: ${profile.phone || '-'}`,
     `计划: ${profile.planType || '-'}`,
@@ -106,49 +73,12 @@ function renderAccountInfo(profile, query = {}) {
     `签发时间: ${formatUnixTime(profile.issuedAt)}`,
     `过期时间: ${formatUnixTime(profile.expiresAt)}`,
     `Scopes: ${profile.scopes.length ? profile.scopes.join(', ') : '-'}`,
-    `Workspace 数量: ${workspaceIds.length}`,
-    `Workspace IDs: ${workspaceIds.length ? workspaceIds.join(', ') : '-'}`,
-    endpointLine('/backend-api/me', query.me),
-    endpointLine('/backend-api/accounts', query.accounts),
+    `Workspace 数量: 静态页面不查询`,
+    `Workspace IDs: 静态页面不查询`,
+    `/backend-api/me: 静态页面不请求`,
+    `/backend-api/accounts: 静态页面不请求`,
+    `说明: 本页只解析 AT 自带 claims，不联网，不判断空间状态`,
   ].join('\n');
-}
-
-async function queryEndpoint(accessToken, path) {
-  try {
-    const response = await fetch(`https://chatgpt.com${path}`, {
-      method: 'GET',
-      mode: 'cors',
-      cache: 'no-store',
-      headers: {
-        accept: '*/*',
-        authorization: `Bearer ${accessToken}`,
-      },
-    });
-    const text = await response.text();
-    let data = null;
-    let jsonError = '';
-    if (text) {
-      try {
-        data = JSON.parse(text);
-      } catch (err) {
-        jsonError = err.message || String(err);
-      }
-    }
-    return {
-      status: response.status,
-      ok: response.status === 200 && !jsonError,
-      contentType: response.headers.get('content-type') || '',
-      textLength: text.length,
-      textPreview: text.slice(0, 500),
-      jsonError,
-      data,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      error: `${err.name || 'Error'}: ${err.message || String(err)}`,
-    };
-  }
 }
 
 async function submitAt() {
@@ -171,22 +101,14 @@ async function submitAt() {
     const email = profile.email || '-';
     const queryLog = logLine(`查询${tokenLabel(accessToken)}的账号邮箱为${email}`);
 
-    appendProgress('查询账号基础信息中: /backend-api/me');
-    const me = await queryEndpoint(accessToken, '/backend-api/me');
-    appendProgress(me.ok ? '得到接口信息: /backend-api/me' : `接口查询失败: /backend-api/me ${me.error || me.status}`);
+    appendProgress('静态页面不请求 /backend-api/me');
+    appendProgress('静态页面不请求 /backend-api/accounts');
+    const finalLog = `${queryLog}\n${logLine(`${label}静态解析完成，未联网查询 workspace`)}`;
 
-    appendProgress('查询账号空间信息中: /backend-api/accounts');
-    const accounts = await queryEndpoint(accessToken, '/backend-api/accounts');
-    appendProgress(accounts.ok ? '得到接口信息: /backend-api/accounts' : `接口查询失败: /backend-api/accounts ${accounts.error || accounts.status}`);
-
-    const query = { me, accounts };
-    const workspaceIds = extractWorkspaceIds(accounts);
-    const finalLog = `${queryLog}\n${logLine(`${label}邮箱当前工作区为[${workspaceIds.length ? workspaceIds.join(', ') : '纯前端查询失败或无工作区'}]`)}`;
-
-    renderAccountInfo(profile, query);
+    renderAccountInfo(profile);
     $('operator-log').value = finalLog;
     appendProgress('完成');
-    setResult(me.ok && accounts.ok ? '纯前端查询完成' : '纯前端查询完成，但存在接口失败', me.ok && accounts.ok ? 'ok' : 'err');
+    setResult('纯前端本地解析完成', 'ok');
   } catch (err) {
     setResult(`解析失败: ${err.message || JSON.stringify(err)}`, 'err');
     appendProgress(`解析失败: ${err.message || JSON.stringify(err)}`);

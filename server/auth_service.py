@@ -16,6 +16,8 @@ from aiohttp import web
 
 
 SESSION_COOKIE = "k12_session"
+LOCAL_WHITELIST_USERNAME = "127.0.0.1"
+LOCAL_WHITELIST_USABLE_COUNT = 999999
 
 
 def utc_now() -> datetime:
@@ -281,15 +283,37 @@ class AuthService:
         row = self._verified_user_row(username, password)
         if row is None or not bool(row["is_active"]) or int(row["usable_count"]) <= 0:
             return None
+        user = AuthUser(str(row["username"]), int(row["usable_count"]), bool(row["is_active"]))
+        return self._create_session(user, headers_snapshot)
+
+    def trusted_local_login(self, headers_snapshot: dict[str, Any]) -> tuple[str, str, AuthUser]:
+        password = secrets.token_urlsafe(32)
+        user = AuthUser(LOCAL_WHITELIST_USERNAME, LOCAL_WHITELIST_USABLE_COUNT, True)
+        with self._connect() as conn:
+            self.upsert_user(
+                user.username,
+                password,
+                usable_count=user.usable_count,
+                conn=conn,
+            )
+            return self._create_session(user, headers_snapshot, conn=conn)
+
+    def _create_session(
+        self,
+        user: AuthUser,
+        headers_snapshot: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[str, str, AuthUser]:
         token = secrets.token_urlsafe(32)
         entry_token = secrets.token_urlsafe(24)
         token_hash = hash_text(token)
         entry_token_hash = hash_text(entry_token)
         now = utc_now()
         expires_at = now + self.session_ttl
-        user = AuthUser(str(row["username"]), int(row["usable_count"]), bool(row["is_active"]))
-        with self._connect() as conn:
-            conn.execute(
+
+        def run(db: sqlite3.Connection) -> None:
+            db.execute(
                 """
                 INSERT INTO auth_sessions (
                     token_hash, username, entry_token_hash, created_at, expires_at, last_seen_at,
@@ -309,10 +333,16 @@ class AuthService:
                     json.dumps(headers_snapshot, ensure_ascii=False, separators=(",", ":")),
                 ),
             )
-            conn.execute(
+            db.execute(
                 "UPDATE auth_users SET last_login_at = ?, updated_at = ? WHERE username = ?",
                 (now.isoformat(), now.isoformat(), user.username),
             )
+
+        if conn is not None:
+            run(conn)
+            return token, entry_token, user
+        with self._connect() as db:
+            run(db)
         return token, entry_token, user
 
     def consume_entry_token(self, token: str, entry_token: str) -> AuthUser | None:

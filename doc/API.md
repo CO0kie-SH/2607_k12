@@ -1,7 +1,7 @@
 # K12 工作台 API 文档
 
-版本：`26.7.3B`  
-最后更新：`2026-07-03`
+版本：`26.7.4B`
+最后更新：`2026-07-04`
 
 本项目使用 `aiohttp` 提供 HTTP 页面、静态资源、登录接口和 WebSocket JSON-RPC。当前主流程是：登录首页 -> WebSocket 后端版页面 -> K12 账号查询和空间申请。
 
@@ -11,16 +11,18 @@
 | --- | --- | --- | --- |
 | `GET` | `/` | 否 | 登录首页 |
 | `GET` | `/html/websocket` | Cookie + entry token | K12 WebSocket 后端版主页面 |
-| `GET` | `/html/js` | 否 | 纯前端实验页 |
+| `GET` | `/html/js` | 否 | 纯前端本地解析页 |
 | `GET` | `/api/status` | Cookie | 服务状态 |
 | `GET` | `/api/auth/me` | Cookie | 当前登录态 |
 | `POST` | `/api/auth/query` | 账号密码 | 查询账号并返回 remote、RPM 和可用次数 |
 | `POST` | `/api/auth/login` | 账号密码 | 登录并写入 session cookie，返回一次性 entry token |
 | `POST` | `/api/auth/logout` | Cookie | 退出登录 |
-| `GET` | `/ws` | 是 | WebSocket JSON-RPC |
+| `GET` | `/ws` | Cookie + Origin | WebSocket JSON-RPC |
 | `GET` | `/static/*` | 否 | 静态资源 |
 
 ## 运行配置
+
+AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 
 默认参数：
 
@@ -35,12 +37,25 @@ auth_default_password=admin123456
 auth_default_uses=100
 k12_base_url=https://chatgpt.com
 k12_proxy=http://127.0.0.1:7897
+allowed_origins=http://127.0.0.1:8088,http://localhost:8088,http://[::1]:8088
 ```
 
 启动示例：
 
 ```powershell
 & 'D:\0Code2\py312\python.exe' main.py --host 127.0.0.1 --port 8088
+```
+
+公网反代部署时需要显式配置 WebSocket Origin 白名单：
+
+```powershell
+& 'D:\0Code2\py312\python.exe' main.py --host 127.0.0.1 --port 8088 --allowed-origins "https://your-domain.example"
+```
+
+也可以使用环境变量：
+
+```text
+K12_ALLOWED_ORIGINS=https://your-domain.example
 ```
 
 ## 登录和会话
@@ -288,9 +303,27 @@ Set-Cookie: k12_session=<token>; HttpOnly; Path=/; SameSite=Lax; Max-Age=43200
 
 刷新工作台页面会重复请求同一个 `entry_token`，后端会判定该令牌已消费，删除当前 session 并回到首页。
 
+### `GET /html/js`
+
+纯前端本地解析页，不经过本项目后端代理，也不发起对外网络请求。
+
+该页面当前只保留一类行为：
+
+- 本地解析 AT 的 JWT payload，不需要联网。
+
+旧版曾尝试使用浏览器直接请求官方接口；当前版本已移除该行为，避免静态页面受 CORS、浏览器登录态和网络环境影响。
+
+详细说明见：`doc/AT_RT_GUIDE.md`。
+
 ### `GET /ws`
 
-必须携带有效 `k12_session` Cookie。
+必须携带有效 `k12_session` Cookie，且 WebSocket 握手请求的 `Origin` 必须在服务端白名单中。
+
+Origin 不匹配时：
+
+```text
+403 forbidden origin
+```
 
 未登录时：
 
@@ -466,6 +499,13 @@ ws://127.0.0.1:8088/ws
 }
 ```
 
+空间状态判断边界：
+
+- `workspace_details` 当前只按官方返回记录可见字段。
+- 已观察到的字段包括 `id`、`name`、`structure`、`processor`、`current_user_role`、`eligible_for_auto_reactivation`、`created_time`。
+- 当前未观察到稳定的 `status`、`disabled`、`suspended`、`active`、`subscription_status`、`billing_status`、`plan_status`、`deactivated_at`、`cancel_at` 等直接状态字段。
+- 因此当前不能可靠判断哪个 workspace 已停用，也不能仅凭 `processor=stripe` 或 `eligible_for_auto_reactivation=true` 推断空间 active、停用或当前账号付费状态。
+
 相关通知：
 
 - `k12.progress`
@@ -485,8 +525,8 @@ ws://127.0.0.1:8088/ws
   "params": {
     "access_token": "eyJ...",
     "workspace_ids": [
-      "255de4a6-96a4-430a-b660-358954424e79",
-      "ff598c4d-ccaf-40c1-bfaa-cb94565764b1"
+      "b49cd6d8-b52d-4c21-93d7-89cc19b5e18e",
+      "eb6642e8-b4a6-4652-9c18-67099f2781cc"
     ],
     "operator_log": "..."
   }
@@ -521,10 +561,10 @@ ws://127.0.0.1:8088/ws
 {
   "success": true,
   "stopped_by": "first_success",
-  "accepted_workspace_id": "255de4a6-96a4-430a-b660-358954424e79",
+  "accepted_workspace_id": "b49cd6d8-b52d-4c21-93d7-89cc19b5e18e",
   "results": [
     {
-      "workspace_id": "255de4a6-96a4-430a-b660-358954424e79",
+      "workspace_id": "b49cd6d8-b52d-4c21-93d7-89cc19b5e18e",
       "request_ok": true,
       "accept_ok": true,
       "status": "accepted"
@@ -649,8 +689,19 @@ workspace_id,plan_type,email_suffix,available
 示例：
 
 ```text
-255de4a6-96a4-430a-b660-358954424e79,k12,outlook.com,true
-ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true
+b49cd6d8-b52d-4c21-93d7-89cc19b5e18e,k12,gmail.com,true,
+eb6642e8-b4a6-4652-9c18-67099f2781cc,k12,gmail.com,true,
+83bec9de-395a-44e6-9a30-189508c22b99,k12,gmail.com,true,
+a0a16bc9-e1b1-45f0-b269-812b53f60121,k12,gmail.com,true,
+5e4c9b31-1b4e-4887-839b-607597928d7c,k12,gmail.com,true,
+ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true,
+631e1603-06cf-4f0b-b79b-d09fbfcfe98d,k12,outlook.com,true,
+a65ebb2e-dd7c-4fdb-9a5d-6ccaf6ad00a3,k12,outlook.com,true,
+52fb9943-aa13-4959-92bc-fe5e81c9e7f0,k12,outlook.com,true,
+d3c40646-82b0-42a5-a9e6-01819e5f66b2,k12,outlook.com,true,
+a4ed7848-dc98-4510-b4f8-ee170aad52ce,k12,outlook.com,true,
+c4d1df5b-81cd-445d-a5ea-4131a0fbb9d2,k12,outlook.com,true,
+44a5d4e6-e463-4412-88f3-0c98290027b7,k12,outlook.com,true,
 ```
 
 匹配规则：
@@ -665,6 +716,7 @@ ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true
 已完成：
 
 - `node --check static/index.js`
+- `node --check static/js-only.js`
 - `node --check static/websocket.js`
 - `python -B -m py_compile server/app.py server/auth_service.py server/k12_service.py tool/base_http_client.py tool/curl_cffi_client.py main.py`
 - 未登录访问 `/html/websocket` 返回 `302 /?session=expired`
@@ -673,7 +725,10 @@ ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true
 - `/api/auth/login` 登录成功并返回一次性 `entry_token`。
 - 登录后携带未消费 `entry_token` 访问 `/html/websocket` 返回 `200`。
 - 重复访问或刷新同一个 `/html/websocket?entry=...` 会删除 session 并回到首页。
+- `/ws` 缺失 `Origin` 或 Origin 不在白名单时返回 `403`。
+- `/ws` 携带白名单 Origin 且已登录时收到 `server.hello`。
 - 登录后连接 `/ws` 收到 `server.hello`。
 - 工作台页面包含“打开网页”和“退出空间”按钮。
 - “打开网页”目标为 `https://chatgpt.com/api/auth/session`。
 - “退出空间”只打开账号设置入口并写入操作日志，不调用后端退出空间 API。
+- 纯 JS 页面 `/html/js` 不再发起外部请求，只做 AT JWT payload 本地解析。

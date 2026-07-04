@@ -64,11 +64,6 @@ async function postJson(path, payload) {
 
 async function queryAccount() {
   const payload = credentialsPayload();
-  if (!payload.username || !payload.password) {
-    setAuthResult('请输入账号名和密码', 'err');
-    return;
-  }
-
   const btn = $('query-account-btn');
   btn.disabled = true;
   btn.classList.add('running');
@@ -88,11 +83,6 @@ async function queryAccount() {
 
 async function login() {
   const payload = credentialsPayload();
-  if (!payload.username || !payload.password) {
-    setAuthResult('请输入账号名和密码', 'err');
-    return;
-  }
-
   const btn = $('login-btn');
   btn.disabled = true;
   btn.classList.add('running');

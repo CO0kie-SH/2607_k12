@@ -7,11 +7,18 @@ import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
 
 from . import jsonrpc
-from .auth_service import SESSION_COOKIE, AuthService, request_headers_snapshot
+from .auth_service import (
+    LOCAL_WHITELIST_USABLE_COUNT,
+    LOCAL_WHITELIST_USERNAME,
+    SESSION_COOKIE,
+    AuthService,
+    request_headers_snapshot,
+)
 from .k12_service import K12Service
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +27,12 @@ DEFAULT_DB_DIR = ROOT / "db"
 DEFAULT_LOG_DIR = ROOT / "log"
 DEFAULT_AUTH_DB = DEFAULT_DB_DIR / "auth.sqlite3"
 DEFAULT_K12_PROXY = "http://127.0.0.1:7897"
+DEFAULT_ALLOWED_ORIGINS = (
+    "http://127.0.0.1:8088",
+    "http://localhost:8088",
+    "http://[::1]:8088",
+)
+LOCAL_WHITELIST_REMOTE = "127.0.0.1"
 
 
 def setup_logging(log_dir: Path) -> logging.Logger:
@@ -65,11 +78,45 @@ def auth_user(request: web.Request):
     return request.app["auth"].user_from_token(request.cookies.get(SESSION_COOKIE, ""))
 
 
+def normalize_origin(origin: str) -> str:
+    origin = origin.strip().rstrip("/")
+    if not origin:
+        return ""
+    parsed = urlsplit(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path or parsed.query or parsed.fragment:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".lower()
+
+
+def parse_allowed_origins(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return DEFAULT_ALLOWED_ORIGINS
+    origins: list[str] = []
+    seen: set[str] = set()
+    for item in value.split(","):
+        origin = normalize_origin(item)
+        if origin and origin not in seen:
+            origins.append(origin)
+            seen.add(origin)
+    return tuple(origins)
+
+
+def is_allowed_ws_origin(request: web.Request) -> bool:
+    origin = normalize_origin(request.headers.get("Origin", ""))
+    if not origin:
+        return False
+    return origin in request.app["allowed_origins"]
+
+
 def no_store(response: web.StreamResponse) -> web.StreamResponse:
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
+
+def is_local_whitelist_remote(remote: str) -> bool:
+    return remote == LOCAL_WHITELIST_REMOTE
 
 
 async def index(_: web.Request) -> web.FileResponse:
@@ -124,17 +171,33 @@ async def api_auth_query(request: web.Request) -> web.Response:
     password = str(data.get("password", ""))
     headers_snapshot = request_headers_snapshot(request)
     risk = request.app["auth"].record_request(headers_snapshot)
-    user = request.app["auth"].query_user(username, password)
+    local_whitelisted = is_local_whitelist_remote(risk.remote)
+    user = None if local_whitelisted else request.app["auth"].query_user(username, password)
     request.app["logger"].info(
-        "auth query username=%s ok=%s remote=%s request_count=%s window_seconds=%s environment=%s headers=%s",
-        username or "-",
-        bool(user),
+        "auth query username=%s ok=%s local_whitelist=%s remote=%s request_count=%s window_seconds=%s environment=%s headers=%s",
+        LOCAL_WHITELIST_USERNAME if local_whitelisted else username or "-",
+        local_whitelisted or bool(user),
+        local_whitelisted,
         risk.remote,
         risk.request_count,
         risk.window_seconds,
         risk.environment_key,
         json.dumps(headers_snapshot, ensure_ascii=False, separators=(",", ":")),
     )
+    if local_whitelisted:
+        return web.json_response(
+            {
+                "ok": True,
+                "username": LOCAL_WHITELIST_USERNAME,
+                "usable_count": LOCAL_WHITELIST_USABLE_COUNT,
+                "is_active": True,
+                "remote": risk.remote,
+                "request_count": risk.request_count,
+                "window_seconds": risk.window_seconds,
+                "session_mark": LOCAL_WHITELIST_USERNAME,
+                "local_whitelist": True,
+            }
+        )
     if user is None:
         return web.json_response(
             {
@@ -165,11 +228,17 @@ async def api_auth_login(request: web.Request) -> web.Response:
     password = str(data.get("password", ""))
     headers_snapshot = request_headers_snapshot(request)
     risk = request.app["auth"].record_request(headers_snapshot)
-    login_result = request.app["auth"].login(username, password, headers_snapshot)
+    local_whitelisted = is_local_whitelist_remote(risk.remote)
+    login_result = (
+        request.app["auth"].trusted_local_login(headers_snapshot)
+        if local_whitelisted
+        else request.app["auth"].login(username, password, headers_snapshot)
+    )
     request.app["logger"].info(
-        "auth login username=%s ok=%s remote=%s request_count=%s window_seconds=%s environment=%s headers=%s",
-        username or "-",
+        "auth login username=%s ok=%s local_whitelist=%s remote=%s request_count=%s window_seconds=%s environment=%s headers=%s",
+        LOCAL_WHITELIST_USERNAME if local_whitelisted else username or "-",
         bool(login_result),
+        local_whitelisted,
         risk.remote,
         risk.request_count,
         risk.window_seconds,
@@ -197,6 +266,8 @@ async def api_auth_login(request: web.Request) -> web.Response:
             "remote": risk.remote,
             "request_count": risk.request_count,
             "window_seconds": risk.window_seconds,
+            "session_mark": LOCAL_WHITELIST_USERNAME if local_whitelisted else user.username,
+            "local_whitelist": local_whitelisted,
         }
     )
     response.set_cookie(
@@ -290,6 +361,16 @@ async def handle_rpc(request: web.Request, req: dict[str, Any]) -> dict[str, Any
 
 
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
+    if not is_allowed_ws_origin(request):
+        request.app["logger"].warning(
+            "blocked websocket origin remote=%s origin=%s host=%s allowed_origins=%s",
+            request.remote,
+            request.headers.get("Origin", ""),
+            request.headers.get("Host", ""),
+            ",".join(request.app["allowed_origins"]),
+        )
+        raise web.HTTPForbidden(text="forbidden origin")
+
     user = auth_user(request)
     if user is None:
         request.app["logger"].warning("blocked unauthenticated websocket remote=%s", request.remote)
@@ -345,11 +426,12 @@ async def start_background(app: web.Application) -> None:
     app["logger"] = setup_logging(app["log_dir"])
     created_default_user = app["auth"].initialize()
     app["logger"].info(
-        "k12 server starting db_dir=%s log_dir=%s auth_db=%s proxy=%s",
+        "k12 server starting db_dir=%s log_dir=%s auth_db=%s proxy=%s allowed_origins=%s",
         app["db_dir"],
         app["log_dir"],
         app["auth_db"],
         app["k12_proxy"],
+        ",".join(app["allowed_origins"]) or "-",
     )
     if created_default_user:
         app["logger"].info(
@@ -388,6 +470,7 @@ def create_app(
     auth_default_uses: int = 100,
     k12_base_url: str = "https://chatgpt.com",
     k12_proxy: str | None = DEFAULT_K12_PROXY,
+    allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS,
 ) -> web.Application:
     app = web.Application()
     app["db_dir"] = db_dir
@@ -403,6 +486,7 @@ def create_app(
     )
     app["k12_base_url"] = k12_base_url
     app["k12_proxy"] = k12_proxy
+    app["allowed_origins"] = tuple(origin for origin in (normalize_origin(item) for item in allowed_origins) if origin)
     app["clients"] = set()
     app.router.add_get("/", index)
     app.router.add_get("/html/websocket", websocket_page)
@@ -431,6 +515,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--auth-default-uses", type=int, default=int(os.getenv("K12_AUTH_USES", "100")))
     parser.add_argument("--k12-base-url", default="https://chatgpt.com")
     parser.add_argument("--k12-proxy", default=DEFAULT_K12_PROXY, help="HTTP proxy for K12 account queries")
+    parser.add_argument(
+        "--allowed-origins",
+        default=os.getenv("K12_ALLOWED_ORIGINS"),
+        help="Comma-separated WebSocket Origin whitelist, e.g. https://example.com,https://www.example.com",
+    )
     return parser.parse_args()
 
 
@@ -446,6 +535,7 @@ def main() -> None:
             auth_default_uses=args.auth_default_uses,
             k12_base_url=args.k12_base_url,
             k12_proxy=args.k12_proxy,
+            allowed_origins=parse_allowed_origins(args.allowed_origins),
         ),
         host=args.host,
         port=args.port,
