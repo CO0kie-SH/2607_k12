@@ -16,7 +16,7 @@ from . import jsonrpc
 from .auth_service import (
     LOCAL_WHITELIST_USABLE_COUNT,
     LOCAL_WHITELIST_USERNAME,
-    NAMED_WHITELIST_USERNAME,
+    NAMED_WHITELIST_USERNAMES,
     SESSION_COOKIE,
     AuthService,
     request_headers_snapshot,
@@ -151,8 +151,12 @@ def is_local_whitelist_remote(remote: str) -> bool:
     return remote == LOCAL_WHITELIST_REMOTE
 
 
-def is_named_whitelist_username(username: str) -> bool:
-    return username.strip().lower() == NAMED_WHITELIST_USERNAME
+def named_whitelist_username(username: str) -> str:
+    normalized = username.strip().lower()
+    for item in NAMED_WHITELIST_USERNAMES:
+        if normalized == item.lower():
+            return item
+    return ""
 
 
 def is_workspace_csv_header(line: str) -> bool:
@@ -227,10 +231,11 @@ async def api_auth_query(request: web.Request) -> web.Response:
     password = str(data.get("password", ""))
     headers_snapshot = request_headers_snapshot(request)
     risk = request.app["auth"].record_request(headers_snapshot)
-    named_whitelisted = is_named_whitelist_username(username)
+    named_whitelist = named_whitelist_username(username)
+    named_whitelisted = bool(named_whitelist)
     local_whitelisted = (not named_whitelisted) and is_local_whitelist_remote(risk.remote)
     user = None if (named_whitelisted or local_whitelisted) else request.app["auth"].query_user(username, password)
-    whitelist_username = NAMED_WHITELIST_USERNAME if named_whitelisted else LOCAL_WHITELIST_USERNAME
+    whitelist_username = named_whitelist if named_whitelisted else LOCAL_WHITELIST_USERNAME
     request.app["logger"].info(
         "auth query username=%s ok=%s local_whitelist=%s named_whitelist=%s remote=%s remote_source=%s request_count=%s window_seconds=%s environment=%s headers=%s",
         whitelist_username if (named_whitelisted or local_whitelisted) else username or "-",
@@ -289,11 +294,12 @@ async def api_auth_login(request: web.Request) -> web.Response:
     password = str(data.get("password", ""))
     headers_snapshot = request_headers_snapshot(request)
     risk = request.app["auth"].record_request(headers_snapshot)
-    named_whitelisted = is_named_whitelist_username(username)
+    named_whitelist = named_whitelist_username(username)
+    named_whitelisted = bool(named_whitelist)
     local_whitelisted = (not named_whitelisted) and is_local_whitelist_remote(risk.remote)
-    whitelist_username = NAMED_WHITELIST_USERNAME if named_whitelisted else LOCAL_WHITELIST_USERNAME
+    whitelist_username = named_whitelist if named_whitelisted else LOCAL_WHITELIST_USERNAME
     if named_whitelisted:
-        login_result = request.app["auth"].trusted_named_login(NAMED_WHITELIST_USERNAME, headers_snapshot)
+        login_result = request.app["auth"].trusted_named_login(named_whitelist, headers_snapshot)
     elif local_whitelisted:
         login_result = request.app["auth"].trusted_local_login(headers_snapshot)
     else:

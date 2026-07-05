@@ -1,6 +1,6 @@
 # K12 工作台 API 文档
 
-版本：`26.7.5K`
+版本：`26.7.5L`
 最后更新：`2026-07-05`
 
 本项目使用 `aiohttp` 提供 HTTP 页面、静态资源、登录接口和 WebSocket JSON-RPC。当前主流程是：登录首页 -> WebSocket 后端版页面 -> K12 账号查询和空间申请。
@@ -138,7 +138,7 @@ Cloudflare 部署下，服务端优先使用 `CF-Connecting-IP` 作为有效 `re
 
 服务启动时会从 `auth_risk_fingerprints` 和 `auth_risk_events` 中移除历史 `x_forwarded_for` / `x_real_ip` 风控维度记录。
 
-命名白名单账号：`username=im-run` 时无需密码即可查询，响应会包含 `named_whitelist=true`，但仍会记录并返回 RPM。
+命名白名单账号：`username=im-run` 或 `username=linux.do` 时无需密码即可查询，响应会包含 `named_whitelist=true`，但仍会记录并返回 RPM。
 
 请求：
 
@@ -183,7 +183,7 @@ Cloudflare 部署下，服务端优先使用 `CF-Connecting-IP` 作为有效 `re
 
 校验账号密码和可用次数。账号启用且 `usable_count > 0` 时登录成功。
 
-命名白名单账号：`username=im-run` 时无需密码即可登录，服务端会创建 session，`session_mark` 为 `im-run`，响应仍返回 `remote`、`request_count` 和 `window_seconds`。
+命名白名单账号：`username=im-run` 或 `username=linux.do` 时无需密码即可登录，服务端会创建 session，`session_mark` 为实际命中的白名单账号，响应仍返回 `remote`、`request_count` 和 `window_seconds`。
 
 请求：
 
@@ -770,7 +770,7 @@ c4d1df5b-81cd-445d-a5ea-4131a0fbb9d2,k12,outlook.com,true,
 - `/api/auth/query` 不返回 headers，只返回 `remote`、近 60 秒 RPM 和可用次数。
 - `/api/auth/login` 登录成功并返回一次性 `entry_token`。
 - `/api/auth/login` 响应包含启动时缓存的 `workspace_csv`。
-- `username=im-run` 无需密码即可查询和登录，仍返回 RPM 信息。
+- `username=im-run`、`username=linux.do` 无需密码即可查询和登录，仍返回 RPM 信息。
 - K12 查询、保存日志和状态接口的前端响应不包含本地 `*.json` / `*.log` 路径。
 - 登录后携带未消费 `entry_token` 访问 `/html/websocket` 返回 `200`。
 - 重复访问或刷新同一个 `/html/websocket?entry=...` 会删除 session 并回到首页。

@@ -80,7 +80,7 @@ function renderRiskResult(data) {
     `近${windowSeconds}秒请求次数(RPM): ${data.request_count ?? '-'}`,
     `可用次数: ${data.usable_count ?? '-'}`,
   ];
-  if (data.named_whitelist) lines.push('白名单: im-run');
+  if (data.named_whitelist) lines.push(`白名单: ${data.session_mark || data.username || '命名白名单'}`);
   if (data.local_whitelist) lines.push('白名单: 127.0.0.1');
   $('risk-output').value = lines.join('\n');
 }
