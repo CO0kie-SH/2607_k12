@@ -1,4 +1,12 @@
 workspace_id,plan_type,account_email,available
-ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true
-1e595494-2426-4946-b688-58ba75604bcc,k12,gmail.com,true
-7bf3a2ce-3298-40b0-ac9b-3c922a5a91a6,k12,outlook.com,true
+7bf3a2ce-3298-40b0-ac9b-3c922a5a91a6,k12,outlook.com
+255de4a6-96a4-430a-b660-358954424e79,k12,outlook.com
+cf8e512d-1f3b-4603-950c-3d9758a8b435,k12,gmail.com
+42822f8a-b530-4649-97ea-83aac42ecf6d,k12,gmail.com
+696cc59b-a475-44b0-b206-4e03593e658f,k12,gmail.com
+1e595494-2426-4946-b688-58ba75604bcc,k12,gmail.com
+eb6642e8-b4a6-4652-9c18-67099f2781cc,k12,gmail.com
+b49cd6d8-b52d-4c21-93d7-89cc19b5e18e,k12,gmail.com
+ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com
+5e4c9b31-1b4e-4887-839b-607597928d7c,k12,gmail.com
+1040f817-c526-47b6-8991-178659e35705,k12,gmail.com

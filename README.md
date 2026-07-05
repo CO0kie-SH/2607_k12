@@ -1,16 +1,17 @@
 # K12 空间申请 Web 工作台
 
-当前版本：`26.7.5R`
+当前版本：`26.7.5S`
 最后更新：`2026-07-05`
 
 这是一个基于 `aiohttp` 的 K12 空间申请 Web 工作台。主流程通过登录页进入 WebSocket 后端版页面，后端使用 `curl_cffi` 以可配置代理或直连模式查询账号信息、申请空间、导出 JSON 报告并保存操作日志。
 
 纯前端页面 `/html/js` 保留为实验入口；当前主流程是 `/html/websocket`。
 AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
+AT 自带信息和空间接口复用参考见：`doc/AT_WORKSPACE_API_REFERENCE.md`。
 
 ## 本版说明
 
-`26.7.5R` 是当前版本，主线功能为：账号登录、命名白名单账号、白名单 WebSocket 空闲限时会话、账号会话数查询、启动时缓存 `k12.csv` 空间列表、自动忽略 CSV 表头、一次性工作台会话、WebSocket Origin 白名单、AT 查询、按邮箱后缀申请空间、重复申请前端拦截、申请前异常空间校验、申请后新增空间高亮提示、可选成功后停止申请、长申请流程保活、前端路径隐私脱敏、Cloudflare 真实 IP 识别、可配置代理或公网直连、申请后空间列表重试确认、操作日志落盘，以及两个浏览器辅助按钮。
+`26.7.5S` 是当前版本，主线功能为：账号登录、命名白名单账号、白名单 WebSocket 空闲限时会话、账号会话数查询、启动时缓存 `k12.csv` 空间列表、自动忽略 CSV 表头、一次性工作台会话、WebSocket Origin 白名单、AT 查询、按邮箱后缀申请空间、重复申请前端拦截、申请前异常空间校验、申请后新增空间高亮提示、可选成功后停止申请、长申请流程保活、前端路径隐私脱敏、Cloudflare 真实 IP 识别、可配置代理或公网直连、申请后空间列表重试确认、WebSocket 单连接通知隔离、全局最新报告接口禁用、操作日志落盘，以及两个浏览器辅助按钮。
 
 本版“打开网页”用于打开 ChatGPT session 地址；“退出空间”只打开 ChatGPT 账号设置入口并记录当前 workspace ID，不调用后端退出空间 API。
 
@@ -68,7 +69,8 @@ AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 ├── README.md                       # 项目说明
 ├── doc/
 │   ├── API.md                      # HTTP / WebSocket API 文档
-│   └── AT_RT_GUIDE.md              # AT / RT、纯 JS 页面和空间状态边界说明
+│   ├── AT_RT_GUIDE.md              # AT / RT、纯 JS 页面和空间状态边界说明
+│   └── AT_WORKSPACE_API_REFERENCE.md # AT 自带信息和空间接口复用参考
 ├── server/
 │   ├── app.py                      # HTTP 路由、登录接口、WebSocket 和 JSON-RPC 分发
 │   ├── auth_service.py             # SQLite 账号、密码、session 和风控计数
@@ -311,8 +313,8 @@ WebSocket JSON-RPC：
 k12.inspect_at             查询 AT 账号信息并导出报告
 k12.apply_workspaces       按顺序申请空间，可选成功后停止，刷新列表最多重试 3 次
 k12.save_log               保存页面操作日志
-k12.latest                 读取最新 K12 查询报告
-server.status              查询服务状态
+k12.latest                 已禁用，不再跨会话读取全局最新报告
+server.status              查询服务状态，不返回全局最新报告
 ```
 
 详细协议见：`doc/API.md`。
@@ -327,6 +329,8 @@ server.status              查询服务状态
 - 当前“退出空间”按钮只打开网页入口并记录日志，不调用后端退出空间 API。
 - 如果后续要自动退出空间，需要先确认官方接口、权限、请求方法和幂等规则，再接入后端校验。
 - WebSocket 已增加 Origin 白名单；公网部署时必须把真实 HTTPS 域名写入 `--allowed-origins` 或 `K12_ALLOWED_ORIGINS`。
+- WebSocket 查询、申请、日志保存等通知只回当前连接，不再广播给所有在线客户端。
+- `/api/status`、`server.hello`、`server.status` 和 `k12.latest` 不再返回全局最新 K12 报告，避免跨会话泄露账号摘要。
 - 纯 JS 版本中的 AT 本地解析不需要联网，当前静态页面不再浏览器直连外部接口。
 - 当前 `/backend-api/accounts` 返回字段不足以可靠判断 workspace 是否停用。
 - `processor=stripe` 只能作为订阅/付费处理器线索，不能证明当前账号本人正在付费，也不能证明空间当前 active。
@@ -394,16 +398,23 @@ AT 查询摘要记录。
 
 ## 版本
 
-当前版本：`26.7.5R`
+当前版本：`26.7.5S`
 更新日期：`2026-07-05`
 
 ## 更新日志
+
+### 26.7.5S (2026-07-05)
+
+- 安全：WebSocket RPC 进度、报告和日志通知改为只发送给当前连接，不再广播给所有已连接客户端。
+- 安全：`/api/status`、`server.hello` 和 `server.status` 不再返回 `k12_latest`。
+- 安全：`k12.latest` 保留方法名但返回禁用提示，不再读取 `db/` 目录中的全局最新报告。
 
 ### 26.7.5R (2026-07-05)
 
 - 修复：长申请流程中不再使用 aiohttp WebSocket heartbeat，避免后端执行长 RPC 时未读取 pong 导致连接被判死。
 - 调整：申请空间 RPC 前端超时从固定 180 秒改为按候选数量动态计算，最少 10 分钟、最多 45 分钟。
 - 日志：WebSocket 断开日志增加 `close_code` 和异常信息，便于定位断开原因。
+- 文档：新增 `doc/AT_WORKSPACE_API_REFERENCE.md`，整理 AT 自带字段、账号空间查询接口、空间申请接口、CSV 格式和状态判断边界，方便其它项目复用。
 
 ### 26.7.5Q (2026-07-05)
 

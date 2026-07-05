@@ -86,23 +86,6 @@ async def send_json(ws: web.WebSocketResponse, payload: dict[str, Any]) -> None:
     await ws.send_str(json.dumps(client_safe_payload(payload), ensure_ascii=False))
 
 
-async def broadcast_rpc(app: web.Application, payload: dict[str, Any]) -> None:
-    safe_payload = client_safe_payload(payload)
-    message = json.dumps(safe_payload, ensure_ascii=False)
-    app["logger"].info("broadcast method=%s event_id=%s clients=%s", payload.get("method"), payload.get("event_id"), len(app["clients"]))
-    dead = []
-    for ws in list(app["clients"]):
-        if ws.closed:
-            dead.append(ws)
-            continue
-        try:
-            await ws.send_str(message)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        app["clients"].discard(ws)
-
-
 def auth_user(request: web.Request):
     return request.app["auth"].user_from_token(request.cookies.get(SESSION_COOKIE, ""))
 
@@ -266,7 +249,6 @@ async def api_status(request: web.Request) -> web.Response:
                 "event_id": jsonrpc.make_event_id("http_status"),
                 "auth": {"username": user.username, "usable_count": user.usable_count},
                 "k12_proxy": request.app["k12_proxy"],
-                "k12_latest": request.app["k12"].latest_report(),
                 "clients": len(request.app["clients"]),
             }
         )
@@ -440,7 +422,7 @@ async def api_auth_logout(request: web.Request) -> web.Response:
     return response
 
 
-async def handle_rpc(request: web.Request, req: dict[str, Any]) -> dict[str, Any]:
+async def handle_rpc(request: web.Request, ws: web.WebSocketResponse, req: dict[str, Any]) -> dict[str, Any]:
     rpc_id = req.get("id")
     method = req.get("method")
     params = req.get("params") or {}
@@ -451,14 +433,14 @@ async def handle_rpc(request: web.Request, req: dict[str, Any]) -> dict[str, Any
         access_token = str(params.get("access_token", "")).strip()
         operator_log = str(params.get("operator_log", ""))
         async def progress(payload: dict[str, Any]) -> None:
-            await broadcast_rpc(request.app, jsonrpc.notification("k12.progress", payload))
+            await send_json(ws, jsonrpc.notification("k12.progress", payload))
 
         try:
             result = await request.app["k12"].inspect_access_token(access_token, operator_log, progress=progress)
         except Exception as exc:
             await progress({"stage": "error", "message": f"查询流程失败: {repr(exc)}", "data": {}, "time": jsonrpc.now_ms()})
             raise
-        await broadcast_rpc(request.app, jsonrpc.notification("k12.report", result))
+        await send_json(ws, jsonrpc.notification("k12.report", result))
         return jsonrpc.result(rpc_id, result)
     if method == "k12.apply_workspaces":
         access_token = str(params.get("access_token", "")).strip()
@@ -469,7 +451,7 @@ async def handle_rpc(request: web.Request, req: dict[str, Any]) -> dict[str, Any
             return jsonrpc.error(rpc_id, -32602, "workspace_ids must be a list")
 
         async def progress(payload: dict[str, Any]) -> None:
-            await broadcast_rpc(request.app, jsonrpc.notification("k12.apply_progress", payload))
+            await send_json(ws, jsonrpc.notification("k12.apply_progress", payload))
 
         try:
             result = await request.app["k12"].apply_workspaces(
@@ -485,16 +467,21 @@ async def handle_rpc(request: web.Request, req: dict[str, Any]) -> dict[str, Any
         return jsonrpc.result(rpc_id, result)
     if method == "k12.save_log":
         result = request.app["k12"].save_operator_log(str(params.get("text", "")))
-        await broadcast_rpc(request.app, jsonrpc.notification("k12.log", result))
+        await send_json(ws, jsonrpc.notification("k12.log", result))
         return jsonrpc.result(rpc_id, result)
     if method == "k12.latest":
-        return jsonrpc.result(rpc_id, request.app["k12"].latest_report())
+        return jsonrpc.result(
+            rpc_id,
+            {
+                "disabled": True,
+                "message": "k12.latest 已禁用，避免跨会话读取全局最新报告",
+            },
+        )
     if method == "server.status":
         return jsonrpc.result(
             rpc_id,
             {
                 "k12_proxy": request.app["k12_proxy"],
-                "k12_latest": request.app["k12"].latest_report(),
                 "clients": len(request.app["clients"]),
             },
         )
@@ -651,7 +638,6 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         "server_timeout_seconds": timeout_config["server_timeout_seconds"],
                     },
                     "k12_proxy": request.app["k12_proxy"],
-                    "k12_latest": request.app["k12"].latest_report(),
                     "clients": len(request.app["clients"]),
                 },
             ),
@@ -672,7 +658,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         break
                     pause_whitelist_idle_timer(whitelist_timeout_state)
                     try:
-                        payload = await handle_rpc(request, req)
+                        payload = await handle_rpc(request, ws, req)
                     finally:
                         resume_whitelist_idle_timer(whitelist_timeout_state)
                 except json.JSONDecodeError:

@@ -1,6 +1,6 @@
 # K12 工作台 API 文档
 
-版本：`26.7.5R`
+版本：`26.7.5S`
 最后更新：`2026-07-05`
 
 本项目使用 `aiohttp` 提供 HTTP 页面、静态资源、登录接口和 WebSocket JSON-RPC。当前主流程是：登录首页 -> WebSocket 后端版页面 -> K12 账号查询和空间申请。
@@ -286,7 +286,7 @@ Set-Cookie: k12_session=<token>; HttpOnly; Path=/; SameSite=Lax; Max-Age=43200
 
 ### `GET /api/status`
 
-读取服务状态。该接口需要有效 `k12_session` Cookie，未登录不返回 `k12_latest`。
+读取服务状态。该接口需要有效 `k12_session` Cookie。当前版本不返回全局最新 K12 报告。
 
 未登录响应：
 
@@ -309,7 +309,6 @@ Set-Cookie: k12_session=<token>; HttpOnly; Path=/; SameSite=Lax; Max-Age=43200
     "usable_count": 100
   },
   "k12_proxy": "http://127.0.0.1:7897",
-  "k12_latest": {},
   "clients": 0
 }
 ```
@@ -486,7 +485,6 @@ ws://127.0.0.1:8088/ws
       "server_timeout_seconds": 0
     },
     "k12_proxy": "http://127.0.0.1:7897",
-    "k12_latest": {},
     "clients": 1
   }
 }
@@ -676,7 +674,7 @@ ws://127.0.0.1:8088/ws
 
 ### `k12.latest`
 
-读取 `db/` 目录中最新的 `k12_*.json` 报告。
+已禁用。旧版会读取 `db/` 目录中最新的 `k12_*.json` 报告；当前版本为了避免跨会话读取全局最新账号报告，只返回禁用提示。
 
 请求：
 
@@ -686,6 +684,15 @@ ws://127.0.0.1:8088/ws
   "id": 4,
   "method": "k12.latest",
   "params": {}
+}
+```
+
+响应：
+
+```json
+{
+  "disabled": true,
+  "message": "k12.latest 已禁用，避免跨会话读取全局最新报告"
 }
 ```
 
@@ -709,7 +716,6 @@ ws://127.0.0.1:8088/ws
 ```json
 {
   "k12_proxy": "http://127.0.0.1:7897",
-  "k12_latest": {},
   "clients": 1
 }
 ```
