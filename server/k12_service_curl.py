@@ -123,10 +123,9 @@ class K12Service:
 
         account_id = decoded.get("account_id") or token_hash[:16]
         report_path = self.db_dir / f"k12_{account_id}.json"
-        report["report_path"] = str(report_path)
-        await self._progress(progress, "export", f"导出查询 JSON 中: {report_path}")
+        await self._progress(progress, "export", "生成查询报告中")
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        await self._progress(progress, "export_done", f"查询 JSON 已导出: {report_path}")
+        await self._progress(progress, "export_done", "查询报告已保存")
 
         record = {
             "recorded_at": utc_now(),
@@ -148,10 +147,11 @@ class K12Service:
 
         self.log.info("k12 report exported account_id=%s path=%s", decoded.get("account_id"), report_path)
         await self._progress(progress, "done", "查询流程完成")
+        client_report = dict(report)
+        client_report.pop("operator_log", None)
         return {
-            "report": report,
-            "report_path": str(report_path),
-            "account_info": self._account_info(report),
+            "report": client_report,
+            "account_info": self._account_info(client_report),
         }
 
     async def apply_workspaces(
@@ -283,14 +283,17 @@ class K12Service:
         entry = f"[{utc_now()}]\n{payload}\n\n"
         with path.open("a", encoding="utf-8") as f:
             f.write(entry)
-        return {"path": str(path), "bytes": len(entry.encode("utf-8")), "saved_at": utc_now()}
+        return {"ok": True, "bytes": len(entry.encode("utf-8")), "saved_at": utc_now()}
 
     def latest_report(self) -> dict[str, Any] | None:
         reports = sorted(self.db_dir.glob("k12_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not reports:
             return None
         data = json.loads(reports[0].read_text(encoding="utf-8"))
-        return {"report": data, "report_path": str(reports[0]), "account_info": self._account_info(data)}
+        if isinstance(data, dict):
+            data.pop("report_path", None)
+            data.pop("operator_log", None)
+        return {"report": data, "account_info": self._account_info(data)}
 
     async def _query_account(
         self,
@@ -639,7 +642,6 @@ class K12Service:
 
         lines = [
             f"生成时间: {report.get('generated_at', '')}",
-            f"报告路径: {report.get('report_path', '')}",
             f"邮箱: {decoded.get('email') or '-'}",
             f"手机: {decoded.get('phone') or '-'}",
             f"计划: {decoded.get('plan_type') or '-'}",

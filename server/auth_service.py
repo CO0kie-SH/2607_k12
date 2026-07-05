@@ -17,7 +17,9 @@ from aiohttp import web
 
 SESSION_COOKIE = "k12_session"
 LOCAL_WHITELIST_USERNAME = "127.0.0.1"
+NAMED_WHITELIST_USERNAME = "im-run"
 LOCAL_WHITELIST_USABLE_COUNT = 999999
+IGNORED_REMOTE_JUDGMENT_HEADERS = {"x_forwarded_for", "x_real_ip"}
 
 
 def utc_now() -> datetime:
@@ -37,13 +39,37 @@ def sanitize_headers(headers: Any) -> dict[str, str]:
     return {str(key): str(value) for key, value in headers.items() if str(key).lower() not in hidden}
 
 
+def first_header_ip(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    first = text.split(",", 1)[0].strip()
+    if first.startswith("[") and first.endswith("]"):
+        first = first[1:-1].strip()
+    return first
+
+
+def effective_remote_from_headers(headers: Any, socket_remote: str) -> tuple[str, str]:
+    cf_connecting_ip = first_header_ip(headers.get("CF-Connecting-IP", ""))
+    if cf_connecting_ip:
+        return cf_connecting_ip, "cf_connecting_ip"
+    return socket_remote or "unknown", "socket_remote"
+
+
 def request_headers_snapshot(request: web.Request) -> dict[str, Any]:
+    socket_remote = request.remote or ""
+    safe_headers = sanitize_headers(request.headers)
+    effective_remote, remote_source = effective_remote_from_headers(request.headers, socket_remote)
     return {
-        "remote": request.remote or "",
+        "remote": effective_remote,
+        "remote_source": remote_source,
+        "socket_remote": socket_remote,
+        "cf_connecting_ip": request.headers.get("CF-Connecting-IP", ""),
         "forwarded": request.headers.get("Forwarded", ""),
         "x_forwarded_for": request.headers.get("X-Forwarded-For", ""),
         "x_real_ip": request.headers.get("X-Real-IP", ""),
-        "headers": sanitize_headers(request.headers),
+        "ignored_remote_judgment_headers": sorted(IGNORED_REMOTE_JUDGMENT_HEADERS),
+        "headers": safe_headers,
     }
 
 
@@ -158,6 +184,7 @@ class AuthService:
             )
             self._ensure_column(conn, "auth_sessions", "entry_token_hash", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "auth_sessions", "entry_consumed_at", "TEXT")
+            self._delete_ignored_remote_judgment_dimensions(conn)
             row = conn.execute("SELECT COUNT(*) AS total FROM auth_users").fetchone()
             if int(row["total"]) == 0:
                 self.upsert_user(
@@ -287,8 +314,14 @@ class AuthService:
         return self._create_session(user, headers_snapshot)
 
     def trusted_local_login(self, headers_snapshot: dict[str, Any]) -> tuple[str, str, AuthUser]:
+        return self.trusted_named_login(LOCAL_WHITELIST_USERNAME, headers_snapshot)
+
+    def trusted_named_login(self, username: str, headers_snapshot: dict[str, Any]) -> tuple[str, str, AuthUser]:
+        username = username.strip()
+        if not username:
+            raise ValueError("username 不能为空")
         password = secrets.token_urlsafe(32)
-        user = AuthUser(LOCAL_WHITELIST_USERNAME, LOCAL_WHITELIST_USABLE_COUNT, True)
+        user = AuthUser(username, LOCAL_WHITELIST_USABLE_COUNT, True)
         with self._connect() as conn:
             self.upsert_user(
                 user.username,
@@ -466,12 +499,19 @@ class AuthService:
         return digest.hex()
 
     @staticmethod
+    def _delete_ignored_remote_judgment_dimensions(conn: sqlite3.Connection) -> None:
+        dimensions = tuple(sorted(IGNORED_REMOTE_JUDGMENT_HEADERS))
+        placeholders = ",".join("?" for _ in dimensions)
+        conn.execute(f"DELETE FROM auth_risk_events WHERE dimension IN ({placeholders})", dimensions)
+        conn.execute(f"DELETE FROM auth_risk_fingerprints WHERE dimension IN ({placeholders})", dimensions)
+
+    @staticmethod
     def _risk_dimensions(headers_snapshot: dict[str, Any]) -> list[tuple[str, str]]:
         headers = headers_snapshot.get("headers") or {}
         candidates = [
             ("remote", headers_snapshot.get("remote")),
-            ("x_forwarded_for", headers_snapshot.get("x_forwarded_for")),
-            ("x_real_ip", headers_snapshot.get("x_real_ip")),
+            ("cf_connecting_ip", headers_snapshot.get("cf_connecting_ip")),
+            ("socket_remote", headers_snapshot.get("socket_remote")),
             ("forwarded", headers_snapshot.get("forwarded")),
             ("user_agent", headers.get("User-Agent")),
         ]

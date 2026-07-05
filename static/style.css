@@ -180,7 +180,14 @@ textarea:focus {
   overflow-wrap: anywhere;
 }
 
-.result-line.ok { color: var(--accent); }
+.result-line.ok {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid #99f6e4;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-weight: 720;
+}
 .result-line.err { color: var(--warn); }
 .result-line.busy { color: var(--busy); }
 

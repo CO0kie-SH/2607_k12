@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from . import jsonrpc
 from .auth_service import (
     LOCAL_WHITELIST_USABLE_COUNT,
     LOCAL_WHITELIST_USERNAME,
+    NAMED_WHITELIST_USERNAME,
     SESSION_COOKIE,
     AuthService,
     request_headers_snapshot,
@@ -26,13 +28,16 @@ STATIC_DIR = ROOT / "static"
 DEFAULT_DB_DIR = ROOT / "db"
 DEFAULT_LOG_DIR = ROOT / "log"
 DEFAULT_AUTH_DB = DEFAULT_DB_DIR / "auth.sqlite3"
+DEFAULT_WORKSPACE_CSV = ROOT / "k12.csv"
 DEFAULT_K12_PROXY = "http://127.0.0.1:7897"
+DIRECT_K12_PROXY_VALUES = {"", "none", "no", "false", "0", "direct", "off", "null"}
 DEFAULT_ALLOWED_ORIGINS = (
     "http://127.0.0.1:8088",
     "http://localhost:8088",
     "http://[::1]:8088",
 )
 LOCAL_WHITELIST_REMOTE = "127.0.0.1"
+WINDOWS_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s\r\n\"']+")
 
 
 def setup_logging(log_dir: Path) -> logging.Logger:
@@ -54,12 +59,30 @@ def setup_logging(log_dir: Path) -> logging.Logger:
     return logger
 
 
+def client_safe_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "report_path":
+                continue
+            if key == "path" and isinstance(item, str) and WINDOWS_PATH_RE.search(item):
+                continue
+            safe[key] = client_safe_payload(item)
+        return safe
+    if isinstance(value, list):
+        return [client_safe_payload(item) for item in value]
+    if isinstance(value, str):
+        return WINDOWS_PATH_RE.sub("[server-path]", value)
+    return value
+
+
 async def send_json(ws: web.WebSocketResponse, payload: dict[str, Any]) -> None:
-    await ws.send_str(json.dumps(payload, ensure_ascii=False))
+    await ws.send_str(json.dumps(client_safe_payload(payload), ensure_ascii=False))
 
 
 async def broadcast_rpc(app: web.Application, payload: dict[str, Any]) -> None:
-    message = json.dumps(payload, ensure_ascii=False)
+    safe_payload = client_safe_payload(payload)
+    message = json.dumps(safe_payload, ensure_ascii=False)
     app["logger"].info("broadcast method=%s event_id=%s clients=%s", payload.get("method"), payload.get("event_id"), len(app["clients"]))
     dead = []
     for ws in list(app["clients"]):
@@ -101,6 +124,15 @@ def parse_allowed_origins(value: str | None) -> tuple[str, ...]:
     return tuple(origins)
 
 
+def normalize_k12_proxy(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.lower() in DIRECT_K12_PROXY_VALUES:
+        return None
+    return text
+
+
 def is_allowed_ws_origin(request: web.Request) -> bool:
     origin = normalize_origin(request.headers.get("Origin", ""))
     if not origin:
@@ -117,6 +149,28 @@ def no_store(response: web.StreamResponse) -> web.StreamResponse:
 
 def is_local_whitelist_remote(remote: str) -> bool:
     return remote == LOCAL_WHITELIST_REMOTE
+
+
+def is_named_whitelist_username(username: str) -> bool:
+    return username.strip().lower() == NAMED_WHITELIST_USERNAME
+
+
+def is_workspace_csv_header(line: str) -> bool:
+    first_column = line.split(",", 1)[0].strip().lower().lstrip("\ufeff")
+    return first_column == "workspace_id"
+
+
+def load_workspace_csv_content(path: Path, logger: logging.Logger) -> str:
+    if not path.exists():
+        logger.warning("workspace csv not found path=%s", path)
+        return ""
+    raw_content = path.read_text(encoding="utf-8-sig")
+    lines = [line.strip() for line in raw_content.splitlines() if line.strip()]
+    content_lines = [line for line in lines if not is_workspace_csv_header(line)]
+    content = "\n".join(content_lines)
+    line_count = len(content_lines)
+    logger.info("workspace csv cached path=%s lines=%s bytes=%s", path, line_count, len(content.encode("utf-8")))
+    return content
 
 
 async def index(_: web.Request) -> web.FileResponse:
@@ -145,13 +199,15 @@ async def api_status(request: web.Request) -> web.Response:
     if user is None:
         return web.json_response({"authenticated": False, "message": "login required"}, status=401)
     return web.json_response(
-        {
-            "event_id": jsonrpc.make_event_id("http_status"),
-            "auth": {"username": user.username, "usable_count": user.usable_count},
-            "k12_proxy": request.app["k12_proxy"],
-            "k12_latest": request.app["k12"].latest_report(),
-            "clients": len(request.app["clients"]),
-        }
+        client_safe_payload(
+            {
+                "event_id": jsonrpc.make_event_id("http_status"),
+                "auth": {"username": user.username, "usable_count": user.usable_count},
+                "k12_proxy": request.app["k12_proxy"],
+                "k12_latest": request.app["k12"].latest_report(),
+                "clients": len(request.app["clients"]),
+            }
+        )
     )
 
 
@@ -171,31 +227,36 @@ async def api_auth_query(request: web.Request) -> web.Response:
     password = str(data.get("password", ""))
     headers_snapshot = request_headers_snapshot(request)
     risk = request.app["auth"].record_request(headers_snapshot)
-    local_whitelisted = is_local_whitelist_remote(risk.remote)
-    user = None if local_whitelisted else request.app["auth"].query_user(username, password)
+    named_whitelisted = is_named_whitelist_username(username)
+    local_whitelisted = (not named_whitelisted) and is_local_whitelist_remote(risk.remote)
+    user = None if (named_whitelisted or local_whitelisted) else request.app["auth"].query_user(username, password)
+    whitelist_username = NAMED_WHITELIST_USERNAME if named_whitelisted else LOCAL_WHITELIST_USERNAME
     request.app["logger"].info(
-        "auth query username=%s ok=%s local_whitelist=%s remote=%s request_count=%s window_seconds=%s environment=%s headers=%s",
-        LOCAL_WHITELIST_USERNAME if local_whitelisted else username or "-",
-        local_whitelisted or bool(user),
+        "auth query username=%s ok=%s local_whitelist=%s named_whitelist=%s remote=%s remote_source=%s request_count=%s window_seconds=%s environment=%s headers=%s",
+        whitelist_username if (named_whitelisted or local_whitelisted) else username or "-",
+        named_whitelisted or local_whitelisted or bool(user),
         local_whitelisted,
+        named_whitelisted,
         risk.remote,
+        headers_snapshot.get("remote_source") or "-",
         risk.request_count,
         risk.window_seconds,
         risk.environment_key,
         json.dumps(headers_snapshot, ensure_ascii=False, separators=(",", ":")),
     )
-    if local_whitelisted:
+    if named_whitelisted or local_whitelisted:
         return web.json_response(
             {
                 "ok": True,
-                "username": LOCAL_WHITELIST_USERNAME,
+                "username": whitelist_username,
                 "usable_count": LOCAL_WHITELIST_USABLE_COUNT,
                 "is_active": True,
                 "remote": risk.remote,
                 "request_count": risk.request_count,
                 "window_seconds": risk.window_seconds,
-                "session_mark": LOCAL_WHITELIST_USERNAME,
-                "local_whitelist": True,
+                "session_mark": whitelist_username,
+                "local_whitelist": local_whitelisted,
+                "named_whitelist": named_whitelisted,
             }
         )
     if user is None:
@@ -228,18 +289,23 @@ async def api_auth_login(request: web.Request) -> web.Response:
     password = str(data.get("password", ""))
     headers_snapshot = request_headers_snapshot(request)
     risk = request.app["auth"].record_request(headers_snapshot)
-    local_whitelisted = is_local_whitelist_remote(risk.remote)
-    login_result = (
-        request.app["auth"].trusted_local_login(headers_snapshot)
-        if local_whitelisted
-        else request.app["auth"].login(username, password, headers_snapshot)
-    )
+    named_whitelisted = is_named_whitelist_username(username)
+    local_whitelisted = (not named_whitelisted) and is_local_whitelist_remote(risk.remote)
+    whitelist_username = NAMED_WHITELIST_USERNAME if named_whitelisted else LOCAL_WHITELIST_USERNAME
+    if named_whitelisted:
+        login_result = request.app["auth"].trusted_named_login(NAMED_WHITELIST_USERNAME, headers_snapshot)
+    elif local_whitelisted:
+        login_result = request.app["auth"].trusted_local_login(headers_snapshot)
+    else:
+        login_result = request.app["auth"].login(username, password, headers_snapshot)
     request.app["logger"].info(
-        "auth login username=%s ok=%s local_whitelist=%s remote=%s request_count=%s window_seconds=%s environment=%s headers=%s",
-        LOCAL_WHITELIST_USERNAME if local_whitelisted else username or "-",
+        "auth login username=%s ok=%s local_whitelist=%s named_whitelist=%s remote=%s remote_source=%s request_count=%s window_seconds=%s environment=%s headers=%s",
+        whitelist_username if (named_whitelisted or local_whitelisted) else username or "-",
         bool(login_result),
         local_whitelisted,
+        named_whitelisted,
         risk.remote,
+        headers_snapshot.get("remote_source") or "-",
         risk.request_count,
         risk.window_seconds,
         risk.environment_key,
@@ -266,8 +332,10 @@ async def api_auth_login(request: web.Request) -> web.Response:
             "remote": risk.remote,
             "request_count": risk.request_count,
             "window_seconds": risk.window_seconds,
-            "session_mark": LOCAL_WHITELIST_USERNAME if local_whitelisted else user.username,
+            "session_mark": whitelist_username if (named_whitelisted or local_whitelisted) else user.username,
             "local_whitelist": local_whitelisted,
+            "named_whitelist": named_whitelisted,
+            "workspace_csv": request.app["workspace_csv_content"],
         }
     )
     response.set_cookie(
@@ -424,6 +492,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
 async def start_background(app: web.Application) -> None:
     app["logger"] = setup_logging(app["log_dir"])
+    app["workspace_csv_content"] = load_workspace_csv_content(app["workspace_csv_path"], app["logger"])
     created_default_user = app["auth"].initialize()
     app["logger"].info(
         "k12 server starting db_dir=%s log_dir=%s auth_db=%s proxy=%s allowed_origins=%s",
@@ -471,6 +540,7 @@ def create_app(
     k12_base_url: str = "https://chatgpt.com",
     k12_proxy: str | None = DEFAULT_K12_PROXY,
     allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS,
+    workspace_csv_path: Path = DEFAULT_WORKSPACE_CSV,
 ) -> web.Application:
     app = web.Application()
     app["db_dir"] = db_dir
@@ -485,7 +555,9 @@ def create_app(
         default_usable_count=auth_default_uses,
     )
     app["k12_base_url"] = k12_base_url
-    app["k12_proxy"] = k12_proxy
+    app["k12_proxy"] = normalize_k12_proxy(k12_proxy)
+    app["workspace_csv_path"] = workspace_csv_path
+    app["workspace_csv_content"] = ""
     app["allowed_origins"] = tuple(origin for origin in (normalize_origin(item) for item in allowed_origins) if origin)
     app["clients"] = set()
     app.router.add_get("/", index)
@@ -514,7 +586,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--auth-default-password", default=os.getenv("K12_AUTH_PASSWORD", "admin123456"))
     parser.add_argument("--auth-default-uses", type=int, default=int(os.getenv("K12_AUTH_USES", "100")))
     parser.add_argument("--k12-base-url", default="https://chatgpt.com")
-    parser.add_argument("--k12-proxy", default=DEFAULT_K12_PROXY, help="HTTP proxy for K12 account queries")
+    parser.add_argument(
+        "--k12-proxy",
+        default=os.getenv("K12_PROXY", DEFAULT_K12_PROXY),
+        help="HTTP proxy for K12 account queries; use none/direct/off/0/false/null or empty string for direct mode",
+    )
+    parser.add_argument("--no-k12-proxy", action="store_true", help="Disable K12 proxy and use direct outbound requests")
     parser.add_argument(
         "--allowed-origins",
         default=os.getenv("K12_ALLOWED_ORIGINS"),
@@ -534,7 +611,7 @@ def main() -> None:
             auth_default_password=args.auth_default_password,
             auth_default_uses=args.auth_default_uses,
             k12_base_url=args.k12_base_url,
-            k12_proxy=args.k12_proxy,
+            k12_proxy=None if args.no_k12_proxy else args.k12_proxy,
             allowed_origins=parse_allowed_origins(args.allowed_origins),
         ),
         host=args.host,

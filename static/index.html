@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>K12 工作台入口</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=260705-im-run" />
 </head>
 <body>
   <main class="page home-page">
@@ -30,6 +30,7 @@
       <div class="login-buttons">
         <button id="query-account-btn" type="button">查询</button>
         <button id="login-btn" type="button">登录</button>
+        <button id="enter-workspace-btn" class="inactive-btn" type="button" disabled>进入工作台</button>
       </div>
       <div id="auth-result" class="result-line">等待输入账号</div>
       <textarea id="risk-output" class="risk-output" spellcheck="false" readonly placeholder="查询后显示 remote、RPM 和可用次数"></textarea>
@@ -46,6 +47,6 @@
       </a>
     </section>
   </main>
-  <script src="/static/index.js?v=260704-local-whitelist"></script>
+  <script src="/static/index.js?v=260705-k12-csv"></script>
 </body>
 </html>

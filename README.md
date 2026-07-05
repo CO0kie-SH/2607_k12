@@ -1,16 +1,16 @@
 # K12 空间申请 Web 工作台
 
-当前版本：`26.7.4B`
-最后更新：`2026-07-04`
+当前版本：`26.7.5K`
+最后更新：`2026-07-05`
 
-这是一个基于 `aiohttp` 的 K12 空间申请 Web 工作台。主流程通过登录页进入 WebSocket 后端版页面，后端使用 `curl_cffi` 经过代理查询账号信息、申请空间、导出 JSON 报告并保存操作日志。
+这是一个基于 `aiohttp` 的 K12 空间申请 Web 工作台。主流程通过登录页进入 WebSocket 后端版页面，后端使用 `curl_cffi` 以可配置代理或直连模式查询账号信息、申请空间、导出 JSON 报告并保存操作日志。
 
 纯前端页面 `/html/js` 保留为实验入口；当前主流程是 `/html/websocket`。
 AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 
 ## 本版说明
 
-`26.7.4B` 是当前版本，主线功能为：账号登录、一次性工作台会话、WebSocket Origin 白名单、AT 查询、按邮箱后缀申请空间、重复申请前端拦截、申请后空间列表重试确认、操作日志落盘，以及两个浏览器辅助按钮。
+`26.7.5K` 是当前版本，主线功能为：账号登录、命名白名单账号、启动时缓存 `k12.csv` 空间列表、自动忽略 CSV 表头、一次性工作台会话、WebSocket Origin 白名单、AT 查询、按邮箱后缀申请空间、重复申请前端拦截、申请前异常空间校验、申请后新增空间高亮提示、前端路径隐私脱敏、Cloudflare 真实 IP 识别、可配置代理或公网直连、申请后空间列表重试确认、操作日志落盘，以及两个浏览器辅助按钮。
 
 本版“打开网页”用于打开 ChatGPT session 地址；“退出空间”只打开 ChatGPT 账号设置入口并记录当前 workspace ID，不调用后端退出空间 API。
 
@@ -21,11 +21,15 @@ AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 - 首页 `/` 提供账号名、密码输入框，以及“查询”“登录”按钮。
 - 登录账号存储在 SQLite：`db/auth.sqlite3`。
 - 密码使用 PBKDF2-HMAC-SHA256 加盐哈希，不明文保存。
+- 命名白名单账号 `im-run` 无需密码即可查询和登录，仍会记录并显示有效 `remote` 与近 60 秒 RPM。
 - 账号包含 `usable_count` 可用次数字段。
-- “查询”按钮校验账号密码后，前端显示 `remote`、近 60 秒请求次数 RPM 和账号可用次数。
+- “查询”按钮校验账号密码后，前端显示有效 `remote`、近 60 秒请求次数 RPM 和账号可用次数。
 - 完整 headers 只记录到后端服务日志，不返回前端。
-- 请求事件写入 `db/auth.sqlite3`，当前按 `remote` 维度计算近 60 秒 RPM，后端同时保留 `X-Forwarded-For`、`X-Real-IP`、`Forwarded`、`User-Agent` 等风控维度。
-- 登录成功后写入 `HttpOnly` Cookie：`k12_session`，并返回一次性工作台进入令牌。
+- 请求事件写入 `db/auth.sqlite3`，当前按有效 `remote` 维度计算近 60 秒 RPM；Cloudflare 链路优先使用 `CF-Connecting-IP`，`X-Forwarded-For` 和 `X-Real-IP` 只保留在后端 headers 日志中，不作为判断 IP。
+- 登录成功后写入 `HttpOnly` Cookie：`k12_session`，并返回一次性工作台进入令牌；首页显示 3 秒后才允许手动点击“进入工作台”，不自动跳转。
+- 服务启动时读取一次根目录 `k12.csv`，缓存到内存；登录成功响应会携带该内容，前端进入工作台后填入空间 ID 输入框。
+- `k12.csv` 可以带 `workspace_id,plan_type,account_email,available` 表头；服务端缓存和前端解析都会自动忽略表头。
+- WebSocket 页面和纯 JS 页面静态 HTML 中的空间 ID 输入框默认保持为空。
 - `/html/websocket` 必须携带未消费的一次性进入令牌；刷新工作台页面会丢弃当前会话并回到首页重新登录。
 - 未登录访问 `/html/websocket` 会跳转回首页。
 - `/ws` 会校验 WebSocket `Origin` 白名单，未登录或 Origin 不匹配都会被后端拒绝。
@@ -35,15 +39,22 @@ AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 - AT 查询摘要追加到 `db/k12_at_records.jsonl`。
 - 操作日志保存到 `log/k12_operator.log`。
 - 服务运行日志保存到 `log/k12_server.log`，使用 rotating log。
+- 前端和浏览器网络记录不返回本地 `*.json` / `*.log` 保存路径；服务端只返回“报告已保存”“日志已保存”等无路径状态。
 - 出站 HTTP 客户端统一封装在 `tool/`，主流程默认使用 `tool/curl_cffi_client.py`。
+- 支持代理模式和无代理直连模式；`--k12-proxy none` 或 `--no-k12-proxy` 会让后端直连官方接口。
 - 保留 `curl.exe` 兜底版本：`server/k12_service_curl.py`、`try_join_first_curl.py`。
 - 空间 ID 支持 `workspace_id,plan_type,email_suffix,available` 行格式。
 - 前端按 AT 邮箱后缀匹配可用空间后才申请。
 - 前端会检查当前账号已有 workspace ID，匹配空间已存在时不向后端提交申请。
+- 前端会检查当前 AT 的账号 ID 是否出现在待申请空间列表中；命中时提示“请用个人空间的AT进行申请”，但只跳过该 ID，其它候选空间继续申请。
+- 前端会检查查询结果是否出现 `deactivated_workspace`；命中时提示“请勿使用停用的空间进行申请”并禁用申请。
+- 如果账号自身 ID 和 `deactivated_workspace` 同时命中，前端会记录两条提示，但仅 `deactivated_workspace` 会阻断申请。
 - “打开网页”按钮会打开 `https://chatgpt.com/api/auth/session`，用于浏览器侧检查 ChatGPT session。
 - “退出空间”按钮会基于当前查询到的 workspace 列表记录操作日志，并打开 ChatGPT 账号设置入口；当前不调用后端退出空间 API。
 - 后端会兜底规整 workspace 输入，只取 CSV 第一列 UUID。
 - 申请流程按顺序执行 `request -> accept`，首个 accept 成功后停止。
+- 前端会对比申请前后的 workspace 列表；如果接口返回失败但刷新后出现新增空间，结果栏用绿色提示新增空间。
+- 新增空间日志会使用 `■■■【新增空间】■■■` 标记；因为操作日志是 `textarea`，无法对单行做富文本颜色。
 - HTTP 2xx 都按成功处理，避免 `204 No Content` 被误判失败。
 
 ## 项目结构
@@ -52,6 +63,7 @@ AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 2607_k12/
 ├── main.py                         # aiohttp 服务入口
 ├── requirements.txt                # Python 依赖
+├── k12.csv                         # 登录成功后下发到前端的空间 ID CSV，服务启动时缓存
 ├── README.md                       # 项目说明
 ├── doc/
 │   ├── API.md                      # HTTP / WebSocket API 文档
@@ -91,7 +103,7 @@ AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 - Python 3.12，当前环境：`D:\0Code2\py312\python.exe`
 - 依赖：`aiohttp>=3.9`、`curl_cffi>=0.15`
 - 可选：Node.js，用于检查前端 JS 语法
-- 默认代理：`http://127.0.0.1:7897`
+- 默认代理：`http://127.0.0.1:7897`；公网环境可显式切换为直连
 
 安装依赖：
 
@@ -118,7 +130,13 @@ cd D:\PycharmProjects\0github\2607_k12
 不使用代理：
 
 ```powershell
-& 'D:\0Code2\py312\python.exe' main.py --host 127.0.0.1 --port 8088 --k12-proxy ''
+& 'D:\0Code2\py312\python.exe' main.py --host 127.0.0.1 --port 8088 --k12-proxy none
+```
+
+也可以使用显式直连开关：
+
+```powershell
+& 'D:\0Code2\py312\python.exe' main.py --host 127.0.0.1 --port 8088 --no-k12-proxy
 ```
 
 ## 登录账号
@@ -147,6 +165,7 @@ K12_AUTH_USER
 K12_AUTH_PASSWORD
 K12_AUTH_USES
 K12_ALLOWED_ORIGINS
+K12_PROXY
 ```
 
 注意：默认账号只会在账号表为空时创建。数据库已有账号后，修改启动参数不会覆盖旧账号。
@@ -163,7 +182,8 @@ K12_ALLOWED_ORIGINS
 --auth-default-password    首次初始化默认密码，默认 admin123456
 --auth-default-uses        首次初始化默认可用次数，默认 100
 --k12-base-url             K12 请求基础 URL，默认 https://chatgpt.com
---k12-proxy                K12 后端请求代理，默认 http://127.0.0.1:7897
+--k12-proxy                K12 后端请求代理，默认 http://127.0.0.1:7897；none/direct/off/0/false/null/空字符串表示直连
+--no-k12-proxy             禁用 K12 代理，使用直连模式
 --allowed-origins          WebSocket Origin 白名单，多个 Origin 用英文逗号分隔
 ```
 
@@ -213,41 +233,41 @@ Browser /ws
   └─ 已登录：建立 WebSocket，收到 server.hello；每次 RPC 前重新校验 session
 ```
 
-当前版本只实现登录门槛、remote 近 60 秒 RPM 统计和可用次数查询；尚未在每次申请成功后扣减可用次数。后续限流可基于 `auth_risk_fingerprints` 和 `auth_risk_events` 中的多维指纹数据接入。
+当前版本只实现登录门槛、有效 remote 近 60 秒 RPM 统计和可用次数查询；尚未在每次申请成功后扣减可用次数。后续限流可基于 `auth_risk_fingerprints` 和 `auth_risk_events` 中的多维指纹数据接入。
 
 ## WebSocket 版使用流程
 
 1. 打开 `/`，输入账号名和密码。
 2. 点击“查询”，查看当前 `remote`、近 60 秒 RPM 和账号可用次数。
-3. 点击“登录”，携带一次性 `entry_token` 进入 `/html/websocket`。
-4. 可点击“打开网页”，打开 `https://chatgpt.com/api/auth/session` 检查浏览器侧 ChatGPT session。
-5. 输入 `eyJ...` 开头的 AccessToken。
-6. 点击“提交查询”，后端查询账号信息并导出报告。
-7. 查询成功后点击“申请空间”。
-8. 前端按 AT 邮箱后缀过滤空间 ID，只提交匹配项。
-9. 前端排除当前账号已存在的 workspace ID；如果匹配项全部已存在，不提交后端申请。
-10. 后端逐个执行 `request -> accept`，成功一个即停止。
-11. 申请后刷新空间列表；如果申请 ID 暂未出现，延迟 1 秒后重试，最多请求 3 次。
-12. 如果 `request` 表面失败但刷新后空间已出现，流程会标记为 `confirmed_after_refresh`。
-13. 可点击“退出空间”，打开 ChatGPT 账号设置入口，并在操作日志中记录当前账号 workspace ID。
+3. 点击“登录”，查看信息框中的 `remote`、近 60 秒 RPM 和可用次数。
+4. 等待 3 秒后，手动点击“进入工作台”，携带一次性 `entry_token` 进入 `/html/websocket`。
+5. 可点击“打开网页”，打开 `https://chatgpt.com/api/auth/session` 检查浏览器侧 ChatGPT session。
+6. 输入 `eyJ...` 开头的 AccessToken。
+7. 点击“提交查询”，后端查询账号信息并导出报告。
+8. 查询成功后点击“申请空间”。
+9. 前端按 AT 邮箱后缀过滤空间 ID，只提交匹配项。
+10. 前端排除当前账号已存在的 workspace ID；如果匹配项全部已存在，不提交后端申请。
+11. 前端检查当前 AT 的账号 ID 是否被放进待申请空间列表；如果命中，提示“请用个人空间的AT进行申请”，并从待申请列表中跳过该 ID。
+12. 前端检查查询结果是否包含 `deactivated_workspace`；如果命中，提示“请勿使用停用的空间进行申请”并停止提交。
+13. 后端逐个执行 `request -> accept`，成功一个即停止。
+14. 申请后刷新空间列表；如果申请 ID 暂未出现，延迟 1 秒后重试，最多请求 3 次。
+15. 如果 `request` 表面失败但刷新后空间已出现，流程会标记为 `confirmed_after_refresh`。
+16. 前端会对比申请前后的 workspace 列表；如果出现新增空间，即使后端返回失败，结果栏也用绿色提示新增空间 ID。
+17. 可点击“退出空间”，打开 ChatGPT 账号设置入口，并在操作日志中记录当前账号 workspace ID。
 
-默认空间 ID 列表：
+空间 ID 列表来源：
 
 ```text
-b49cd6d8-b52d-4c21-93d7-89cc19b5e18e,k12,gmail.com,true,
-eb6642e8-b4a6-4652-9c18-67099f2781cc,k12,gmail.com,true,
-83bec9de-395a-44e6-9a30-189508c22b99,k12,gmail.com,true,
-a0a16bc9-e1b1-45f0-b269-812b53f60121,k12,gmail.com,true,
-5e4c9b31-1b4e-4887-839b-607597928d7c,k12,gmail.com,true,
-ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true,
-631e1603-06cf-4f0b-b79b-d09fbfcfe98d,k12,outlook.com,true,
-a65ebb2e-dd7c-4fdb-9a5d-6ccaf6ad00a3,k12,outlook.com,true,
-52fb9943-aa13-4959-92bc-fe5e81c9e7f0,k12,outlook.com,true,
-d3c40646-82b0-42a5-a9e6-01819e5f66b2,k12,outlook.com,true,
-a4ed7848-dc98-4510-b4f8-ee170aad52ce,k12,outlook.com,true,
-c4d1df5b-81cd-445d-a5ea-4131a0fbb9d2,k12,outlook.com,true,
-44a5d4e6-e463-4412-88f3-0c98290027b7,k12,outlook.com,true,
+k12.csv
 ```
+
+说明：
+
+- 服务启动时读取一次 `k12.csv`，并缓存到内存。
+- 如果 `k12.csv` 包含 `workspace_id,...` 表头，缓存和下发内容会自动去掉表头。
+- `/api/auth/login` 成功响应会携带缓存内容字段 `workspace_csv`。
+- 首页前端将 `workspace_csv` 暂存到 `sessionStorage`，进入 `/html/websocket` 后填入空间 ID 输入框。
+- 修改 `k12.csv` 后需要重启服务才会生效。
 
 ## 数据流
 
@@ -259,10 +279,10 @@ Browser /html/websocket
         │                                  ▼
         └────────────── /ws ───────> aiohttp server
                                            │
-                                           ├─ curl_cffi + proxy -> /backend-api/me
-                                           ├─ curl_cffi + proxy -> /backend-api/accounts
-                                           ├─ curl_cffi + proxy -> /invites/request
-                                           ├─ curl_cffi + proxy -> /invites/accept
+                                           ├─ curl_cffi + proxy/direct -> /backend-api/me
+                                           ├─ curl_cffi + proxy/direct -> /backend-api/accounts
+                                           ├─ curl_cffi + proxy/direct -> /invites/request
+                                           ├─ curl_cffi + proxy/direct -> /invites/accept
                                            ├─ export JSON -> db/
                                            └─ save log -> log/
 ```
@@ -298,8 +318,9 @@ server.status              查询服务状态
 ## 风险说明
 
 - 当前“已存在空间不重复申请”只在前端执行。
+- 当前“账号自身 ID 跳过申请”和“`deactivated_workspace` 不得继续申请”也只在前端执行。
 - 后端 `k12.apply_workspaces` 暂不校验申请 ID 是否已存在于当前账号。
-- 如果绕过前端直接调用 WebSocket RPC，仍可能重复提交已有 workspace ID。
+- 如果绕过前端直接调用 WebSocket RPC，仍可能重复提交已有 workspace ID、账号 ID 或停用空间 ID。
 - 生产环境后续建议在后端申请前先查询当前 workspace 列表并做同样拦截。
 - 当前“退出空间”按钮只打开网页入口并记录日志，不调用后端退出空间 API。
 - 如果后续要自动退出空间，需要先确认官方接口、权限、请求方法和幂等规则，再接入后端校验。
@@ -318,7 +339,7 @@ server.status              查询服务状态
 - `auth_users`：账号、密码盐、密码哈希、可用次数、启用状态、最后登录时间。
 - `auth_sessions`：session token hash、一次性 entry token hash、账号、过期时间、最近访问时间、登录 headers 快照。
 - `auth_risk_environments`：风控环境分组，后续可把多个指纹归并到同一环境。
-- `auth_risk_fingerprints`：风控指纹累计计数，当前记录 remote、转发 IP、真实 IP、Forwarded 和 User-Agent 等维度。
+- `auth_risk_fingerprints`：风控指纹累计计数，当前记录有效 remote、`CF-Connecting-IP`、原始 socket remote、Forwarded 和 User-Agent 等维度。
 - `auth_risk_events`：请求事件表，用于计算近 60 秒 RPM。
 
 ### `db/k12_<account_id>.json`
@@ -333,7 +354,6 @@ server.status              查询服务状态
 - `workspace_ids`
 - `workspace_details`
 - `workspace_count`
-- `report_path`
 
 ### `db/k12_at_records.jsonl`
 
@@ -371,10 +391,76 @@ AT 查询摘要记录。
 
 ## 版本
 
-当前版本：`26.7.4B`
-更新日期：`2026-07-04`
+当前版本：`26.7.5K`
+更新日期：`2026-07-05`
 
 ## 更新日志
+
+### 26.7.5K (2026-07-05)
+
+- 调整：登录查询和 RPM 统计使用有效 `remote`，Cloudflare 链路优先采用 `CF-Connecting-IP`。
+- 调整：`X-Forwarded-For` 和 `X-Real-IP` 在当前 Cloudflare 部署中只记录到服务端 headers 日志，不再作为风控判断 IP。
+- 清理：服务启动时会移除历史 `x_forwarded_for` / `x_real_ip` 风控维度记录，避免旧数据参与后续分析。
+- 日志：认证日志增加 `remote_source`，用于确认 remote 来源是 `cf_connecting_ip` 还是 `socket_remote`。
+
+### 26.7.5J (2026-07-05)
+
+- 新增：K12 出站请求支持无代理直连模式，可使用 `--k12-proxy none` 或 `--no-k12-proxy` 启动。
+- 新增：`K12_PROXY` 环境变量可覆盖默认代理；`none/direct/off/0/false/null/空字符串` 都会被识别为直连。
+- 优化：`curl_cffi` 直连模式下不再向 `AsyncSession` 传入代理参数。
+
+### 26.7.5I (2026-07-05)
+
+- 优化：启动读取 `k12.csv` 时自动过滤 `workspace_id,...` 表头，下发给前端的 `workspace_csv` 只包含空间记录。
+- 兜底：前端解析空间 ID 输入框时也会跳过表头，手动粘贴带表头内容不会参与申请匹配。
+
+### 26.7.5H (2026-07-05)
+
+- 隐私：前端不再显示查询报告 JSON 路径和操作日志路径。
+- 隐私：WebSocket 通知、RPC 响应和 `/api/status` 响应会移除 `report_path`，并脱敏历史字符串中的本地 Windows 路径。
+- 调整：查询进度改为“生成查询报告中 / 查询报告已保存”，日志保存结果只显示“日志已保存”。
+
+### 26.7.5G (2026-07-05)
+
+- 调整：WebSocket 页面和纯 JS 页面的空间 ID 输入框静态默认值改为空。
+- 新增：服务启动时读取并缓存根目录 `k12.csv`，登录成功响应携带 `workspace_csv`。
+- 新增：首页保存登录响应中的 `workspace_csv`，进入 WebSocket 工作台后自动填入空间 ID 输入框。
+- 说明：`k12.csv` 修改后需要重启服务才会刷新缓存。
+
+### 26.7.5F (2026-07-05)
+
+- 新增：命名白名单账号 `im-run`，无需密码即可通过 `/api/auth/query` 和 `/api/auth/login`。
+- 调整：首页登录成功后不再自动跳转，先显示 RPM 和可用次数，3 秒后启用“进入工作台”按钮。
+- 日志：`im-run` 与本机 remote 白名单分开记录，session 标记为 `im-run`。
+
+### 26.7.5E (2026-07-05)
+
+- 优化：新增空间提示增加 `■■■【新增空间】■■■` 标记，保存到操作日志后也能明显识别。
+- 优化：结果栏成功状态增加浅绿色背景、边框和加粗显示。
+- 缓存：更新 WebSocket 页面 CSS/JS 静态资源版本号。
+
+### 26.7.5D (2026-07-05)
+
+- 调整：当前 AT 的账号 ID 出现在候选空间列表时，前端只跳过该 ID，不再阻断其它候选空间申请。
+- 日志：查询阶段记录“待申请列表包含当前账号ID”；申请阶段记录“跳过账号自身ID”。
+- 文档：更新前端校验边界，说明该过滤仍未在后端兜底。
+
+### 26.7.5C (2026-07-05)
+
+- 优化：前端申请前保存 workspace 列表快照，申请后用刷新报告做差集。
+- 修复：当接口返回失败但刷新后检测到新增空间时，不再只显示失败；结果栏以绿色提示新增空间 ID。
+- 日志：操作日志增加“申请接口返回失败，但刷新后检测到新增空间”记录。
+
+### 26.7.5B (2026-07-05)
+
+- 修复：查询阶段同时汇总“账号 ID 出现在待申请空间列表”和 `deactivated_workspace` 两类前端阻断原因。
+- 调整：两个异常条件同时命中时，操作日志和结果栏都会展示两条提示。
+
+### 26.7.5A (2026-07-05)
+
+- 修复：前端申请前检查待申请空间 ID 是否包含当前 AT 的账号 ID；命中时提示“请用个人空间的AT进行申请”，不提交后端。
+- 修复：前端查询结果出现 `deactivated_workspace` 时提示“请勿使用停用的空间进行申请”，并禁用申请。
+- 文档：补充以上两个校验当前仅在前端执行，后端 `k12.apply_workspaces` 暂不兜底校验。
 
 ### 26.7.4B (2026-07-04)
 

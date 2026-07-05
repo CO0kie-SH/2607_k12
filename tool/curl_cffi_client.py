@@ -27,7 +27,10 @@ class CurlCffiHttpClient(BaseHttpClient):
     ) -> dict[str, Any]:
         try:
             self.log.info("k12 http %s url=%s proxy=%s transport=%s", method.lower(), url, self.proxy or "-", self.transport)
-            async with AsyncSession(timeout=timeout or self.timeout, proxy=self.proxy, impersonate=self.impersonate) as session:
+            session_kwargs = {"timeout": timeout or self.timeout, "impersonate": self.impersonate}
+            if self.proxy:
+                session_kwargs["proxy"] = self.proxy
+            async with AsyncSession(**session_kwargs) as session:
                 resp = await session.request(method.upper(), url, headers=headers, data=data)
             return self._result(
                 status=resp.status_code,

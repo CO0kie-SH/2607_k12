@@ -1,9 +1,25 @@
 const state = { rpcId: 1, pending: new Map(), ws: null, latest: null, accessToken: '', profile: null };
 let sessionEnding = false;
+const PERSONAL_SPACE_AT_MESSAGE = '请用个人空间的AT进行申请';
+const DEACTIVATED_WORKSPACE_MESSAGE = '请勿使用停用的空间进行申请';
+const ADDED_WORKSPACE_MARK = '■■■【新增空间】■■■';
+const WORKSPACE_CSV_STORAGE_KEY = 'k12_workspace_csv';
+const LOCAL_PATH_RE = /[A-Za-z]:\\[^\s\r\n"']+/g;
 
 const $ = (id) => document.getElementById(id);
 
 $('account-info').value = '';
+
+function initializeWorkspaceCsv() {
+  try {
+    const workspaceCsv = sessionStorage.getItem(WORKSPACE_CSV_STORAGE_KEY);
+    if (workspaceCsv !== null) $('workspace-id').value = workspaceCsv;
+  } catch {
+    // Keep the static default, which is intentionally empty.
+  }
+}
+
+initializeWorkspaceCsv();
 
 function setStatus(text, ok = false) {
   const el = $('status');
@@ -15,6 +31,10 @@ function setResult(text, kind = 'idle') {
   const el = $('result-line');
   el.textContent = text;
   el.className = `result-line ${kind}`;
+}
+
+function sanitizeLocalPaths(text) {
+  return String(text || '').replace(LOCAL_PATH_RE, '[server-path]');
 }
 
 function closeCurrentWebSocket() {
@@ -63,8 +83,8 @@ function setAccountInfo(payload) {
     return;
   }
   state.latest = payload;
-  $('account-info').value = payload.account_info || JSON.stringify(payload.report || payload, null, 2);
-  if (payload.report_path) setResult(`已导出: ${payload.report_path}`, 'ok');
+  $('account-info').value = sanitizeLocalPaths(payload.account_info || JSON.stringify(payload.report || payload, null, 2));
+  if (payload.report || payload.account_info) setResult('查询完成，报告已保存', 'ok');
 }
 
 function setApplyEnabled(enabled) {
@@ -116,11 +136,22 @@ function tokenLabel(accessToken) {
 
 function workspaceSummary(result) {
   const report = result?.report || {};
-  const ids = report.workspace_ids || [];
+  const ids = workspaceIdsFromResult(result);
   if (ids.length) return ids.join(', ');
+  return '-';
+}
+
+function workspaceIdsFromResult(result) {
+  const report = result?.report || {};
+  const ids = Array.isArray(report.workspace_ids) ? report.workspace_ids : [];
+  if (ids.length) return ids.filter(Boolean);
   const items = report.query?.accounts?.data?.items || [];
-  const itemIds = items.map(item => item.id).filter(Boolean);
-  return itemIds.length ? itemIds.join(', ') : '-';
+  return items.map(item => item?.id).filter(Boolean);
+}
+
+function workspaceDiff(beforeIds, result) {
+  const before = beforeIds instanceof Set ? beforeIds : new Set(beforeIds || []);
+  return workspaceIdsFromResult(result).filter(id => !before.has(id));
 }
 
 function workspaceDetails(result) {
@@ -139,17 +170,20 @@ function workspaceDetails(result) {
     }));
 }
 
-function workspaceDetailLogLines(result) {
+function workspaceDetailLogLines(result, highlightIds = []) {
+  const highlighted = highlightIds instanceof Set ? highlightIds : new Set(highlightIds);
   return workspaceDetails(result).map(item => {
+    const prefix = highlighted.has(item.id) ? `${ADDED_WORKSPACE_MARK}` : '';
     if ((item.type || '').toLowerCase() === 'personal') {
-      return logLine(`其中${item.id}为个人空间`);
+      return logLine(`${prefix}其中${item.id}为个人空间`);
     }
-    return logLine(`其中${item.id}空间的类型为:${item.type || '-'}，空间名为${item.name || '-'}，请检查邮箱或者刷新主页查看该空间`);
+    return logLine(`${prefix}其中${item.id}空间的类型为:${item.type || '-'}，空间名为${item.name || '-'}，请检查邮箱或者刷新主页查看该空间`);
   });
 }
 
-function appendWorkspaceDetailLogs(result) {
-  for (const line of workspaceDetailLogLines(result)) {
+function appendWorkspaceDetailLogs(result, highlightIds = []) {
+  const highlighted = new Set(highlightIds);
+  for (const line of workspaceDetailLogLines(result, highlighted)) {
     const el = $('operator-log');
     el.value = el.value ? `${el.value}\n${line}` : line;
     el.scrollTop = el.scrollHeight;
@@ -162,9 +196,27 @@ function clearProgress() {
 
 function appendOperatorLog(text) {
   const el = $('operator-log');
-  const line = logLine(text);
+  const line = logLine(sanitizeLocalPaths(text));
   el.value = el.value ? `${el.value}\n${line}` : line;
   el.scrollTop = el.scrollHeight;
+}
+
+function hasDeactivatedWorkspace(result = state.latest) {
+  const report = result?.report || {};
+  const details = Array.isArray(report.workspace_details) ? report.workspace_details : [];
+  if (details.some(item => String(item?.type || '').toLowerCase() === 'deactivated_workspace')) {
+    return true;
+  }
+
+  function walk(value, depth = 0) {
+    if (depth > 8 || value == null) return false;
+    if (typeof value === 'string') return value.toLowerCase() === 'deactivated_workspace';
+    if (Array.isArray(value)) return value.some(item => walk(item, depth + 1));
+    if (typeof value === 'object') return Object.values(value).some(item => walk(item, depth + 1));
+    return false;
+  }
+
+  return walk(report.query?.accounts?.data);
 }
 
 function openExternalPage(url) {
@@ -191,7 +243,7 @@ function leaveSpacePage() {
 
 function appendProgress(payload) {
   const time = payload.time ? new Date(payload.time).toLocaleTimeString() : new Date().toLocaleTimeString();
-  const line = `[${time}] ${payload.message || payload.stage || ''}`;
+  const line = `[${time}] ${sanitizeLocalPaths(payload.message || payload.stage || '')}`;
   const el = $('progress-log');
   el.textContent = el.textContent && el.textContent !== '等待提交' ? `${el.textContent}\n${line}` : line;
   el.scrollTop = el.scrollHeight;
@@ -217,6 +269,7 @@ function workspaceEntriesFromInput() {
     .split(/\r?\n/)
     .map(item => item.trim())
     .filter(Boolean)
+    .filter(line => line.split(',', 1)[0].trim().toLowerCase() !== 'workspace_id')
     .map(line => {
       const parts = line.split(',').map(item => item.trim());
       return {
@@ -244,6 +297,21 @@ function workspaceIdsForProfile(profile) {
   };
 }
 
+function selfWorkspaceIdsForProfile(profile) {
+  const { ids } = workspaceIdsForProfile(profile);
+  const accountId = String(profile?.accountId || '').trim();
+  if (!accountId) return [];
+  return Array.from(new Set(ids.filter(id => id === accountId)));
+}
+
+function applyGuardMessages(profile, result = state.latest) {
+  const messages = [];
+  if (hasDeactivatedWorkspace(result)) {
+    messages.push(DEACTIVATED_WORKSPACE_MESSAGE);
+  }
+  return messages;
+}
+
 function currentWorkspaceIds() {
   const report = state.latest?.report || {};
   const ids = Array.isArray(report.workspace_ids) ? report.workspace_ids : [];
@@ -267,18 +335,23 @@ async function submitAt() {
   clearProgress();
   setResult('查询中...', 'busy');
   try {
-    const result = await rpc('k12.inspect_at', { access_token: accessToken, operator_log: queryLog });
+    const result = await rpc('k12.inspect_at', { access_token: accessToken, operator_log: sanitizeLocalPaths(queryLog) });
     state.accessToken = accessToken;
     state.profile = profile;
     setAccountInfo(result);
-    setApplyEnabled(true);
+    const guardMessages = applyGuardMessages(profile, result);
+    const selfMatchedIds = selfWorkspaceIdsForProfile(profile);
+    setApplyEnabled(!guardMessages.length);
     const finalLog = [
       queryLog,
       logLine(`${label}邮箱当前工作区为[${workspaceSummary(result)}]`),
       ...workspaceDetailLogLines(result),
+      ...selfMatchedIds.map(id => logLine(`待申请列表包含当前账号ID ${id}，申请时会跳过该ID；${PERSONAL_SPACE_AT_MESSAGE}`)),
+      ...guardMessages.map(message => logLine(message)),
     ].join('\n');
     $('operator-log').value = finalLog;
-    await rpc('k12.save_log', { text: finalLog }).catch(() => {});
+    if (guardMessages.length) setResult(guardMessages.join('；'), 'err');
+    await rpc('k12.save_log', { text: sanitizeLocalPaths(finalLog) }).catch(() => {});
   } catch (err) {
     const message = err.message || err?.error?.message || JSON.stringify(err);
     setResult(`查询失败: ${message}`, 'err');
@@ -295,6 +368,13 @@ async function applyWorkspaces() {
   }
   const profile = state.profile || decodeTokenProfile(state.accessToken);
   const { domain, skipped, ids: workspaceIds } = workspaceIdsForProfile(profile);
+  const guardMessages = applyGuardMessages(profile);
+  if (guardMessages.length) {
+    guardMessages.forEach(message => appendOperatorLog(message));
+    setResult(guardMessages.join('；'), 'err');
+    setApplyEnabled(false);
+    return;
+  }
   if (!workspaceIds.length) {
     const message = domain
       ? `当前邮箱后缀 ${domain} 不匹配任何可申请空间`
@@ -305,8 +385,16 @@ async function applyWorkspaces() {
   }
 
   const existingWorkspaceIds = currentWorkspaceIds();
-  const existingMatchedIds = workspaceIds.filter(id => existingWorkspaceIds.has(id));
-  const applyWorkspaceIds = workspaceIds.filter(id => !existingWorkspaceIds.has(id));
+  const beforeApplyWorkspaceIds = new Set(existingWorkspaceIds);
+  const accountId = String(profile?.accountId || '').trim();
+  const selfMatchedIds = accountId ? Array.from(new Set(workspaceIds.filter(id => id === accountId))) : [];
+  const candidateWorkspaceIds = accountId ? workspaceIds.filter(id => id !== accountId) : workspaceIds;
+  const existingMatchedIds = candidateWorkspaceIds.filter(id => existingWorkspaceIds.has(id));
+  const applyWorkspaceIds = candidateWorkspaceIds.filter(id => !existingWorkspaceIds.has(id));
+
+  if (selfMatchedIds.length) {
+    appendOperatorLog(`跳过账号自身ID ${selfMatchedIds.join(', ')}，${PERSONAL_SPACE_AT_MESSAGE}`);
+  }
 
   if (existingMatchedIds.length) {
     appendOperatorLog(`跳过已存在空间${existingMatchedIds.join(', ')}`);
@@ -314,10 +402,12 @@ async function applyWorkspaces() {
 
   if (!applyWorkspaceIds.length) {
     const message = existingMatchedIds.length
-      ? '匹配的可申请空间已存在于当前账号，不再提交后端申请'
-      : domain
-        ? `当前邮箱后缀 ${domain} 不匹配任何可申请空间`
-        : '当前 AT 未解析到邮箱，无法按邮箱后缀匹配空间';
+      ? '除账号自身外，匹配的可申请空间已存在于当前账号，不再提交后端申请'
+      : selfMatchedIds.length
+        ? '匹配的可申请空间仅包含当前账号ID，不提交后端申请'
+        : domain
+          ? `当前邮箱后缀 ${domain} 不匹配任何可申请空间`
+          : '当前 AT 未解析到邮箱，无法按邮箱后缀匹配空间';
     appendOperatorLog(message);
     setResult(message, existingMatchedIds.length ? 'ok' : 'err');
     return;
@@ -326,7 +416,7 @@ async function applyWorkspaces() {
   const btn = $('reload-btn');
   btn.disabled = true;
   btn.classList.add('running');
-  appendOperatorLog(`邮箱后缀${domain || '-'}匹配可申请空间${workspaceIds.length}个${skipped ? `，跳过${skipped}个` : ''}${existingMatchedIds.length ? `，已存在${existingMatchedIds.length}个` : ''}`);
+  appendOperatorLog(`邮箱后缀${domain || '-'}匹配可申请空间${workspaceIds.length}个${skipped ? `，跳过${skipped}个` : ''}${selfMatchedIds.length ? `，跳过账号自身${selfMatchedIds.length}个` : ''}${existingMatchedIds.length ? `，已存在${existingMatchedIds.length}个` : ''}`);
   appendOperatorLog(`开始申请空间，共${applyWorkspaceIds.length}个`);
   setResult('申请空间中...', 'busy');
 
@@ -334,19 +424,25 @@ async function applyWorkspaces() {
     const result = await rpc('k12.apply_workspaces', {
       access_token: state.accessToken,
       workspace_ids: applyWorkspaceIds,
-      operator_log: $('operator-log').value,
+      operator_log: sanitizeLocalPaths($('operator-log').value),
     }, 180000);
+    const addedWorkspaceIds = result.account_report ? workspaceDiff(beforeApplyWorkspaceIds, result.account_report) : [];
     if (result.account_report) setAccountInfo(result.account_report);
     if (result.success) {
       appendOperatorLog(`申请${result.accepted_workspace_id}成功，流程结束`);
-      if (result.account_report) appendWorkspaceDetailLogs(result.account_report);
-      setResult(`申请成功: ${result.accepted_workspace_id}`, 'ok');
+      if (addedWorkspaceIds.length) appendOperatorLog(`${ADDED_WORKSPACE_MARK}刷新后检测到新增空间: ${addedWorkspaceIds.join(', ')}`);
+      if (result.account_report) appendWorkspaceDetailLogs(result.account_report, addedWorkspaceIds);
+      setResult(addedWorkspaceIds.length ? `${ADDED_WORKSPACE_MARK}申请成功，新增空间: ${addedWorkspaceIds.join(', ')}` : `申请成功: ${result.accepted_workspace_id}`, 'ok');
+    } else if (addedWorkspaceIds.length) {
+      appendOperatorLog(`${ADDED_WORKSPACE_MARK}申请接口返回失败，但刷新后检测到新增空间: ${addedWorkspaceIds.join(', ')}`);
+      if (result.account_report) appendWorkspaceDetailLogs(result.account_report, addedWorkspaceIds);
+      setResult(`${ADDED_WORKSPACE_MARK}检测到新增空间: ${addedWorkspaceIds.join(', ')}`, 'ok');
     } else {
       appendOperatorLog('申请空间失败，列表已全部尝试');
       if (result.account_report) appendWorkspaceDetailLogs(result.account_report);
       setResult('申请空间失败，列表已全部尝试', 'err');
     }
-    await rpc('k12.save_log', { text: $('operator-log').value }).catch(() => {});
+    await rpc('k12.save_log', { text: sanitizeLocalPaths($('operator-log').value) }).catch(() => {});
   } catch (err) {
     const message = err.message || err?.error?.message || JSON.stringify(err);
     appendOperatorLog(`申请空间失败: ${message}`);
@@ -394,7 +490,7 @@ function connectWs() {
     if (msg.method === 'server.hello') $('account-info').value = '';
     if (msg.method === 'k12.progress') appendProgress(msg.params);
     if (msg.method === 'k12.report') setAccountInfo(msg.params);
-    if (msg.method === 'k12.log') setResult(`日志已保存: ${msg.params.path}`, 'ok');
+    if (msg.method === 'k12.log') setResult('日志已保存', 'ok');
     if (msg.method === 'k12.apply_progress') {
       appendProgress(msg.params);
       if (msg.params.message) appendOperatorLog(msg.params.message);
