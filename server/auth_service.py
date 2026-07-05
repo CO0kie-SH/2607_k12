@@ -142,6 +142,8 @@ class AuthService:
                     ON auth_sessions(token_hash);
                 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
                     ON auth_sessions(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_auth_sessions_username
+                    ON auth_sessions(username, expires_at);
 
                 CREATE TABLE IF NOT EXISTS auth_risk_environments (
                     environment_key TEXT PRIMARY KEY,
@@ -454,6 +456,23 @@ class AuthService:
             return
         with self._connect() as conn:
             conn.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (hash_text(token),))
+
+    def active_session_count(self, username: str) -> int:
+        username = username.strip()
+        if not username:
+            return 0
+        now = utc_now_text()
+        with self._connect() as conn:
+            self.delete_expired_sessions(conn=conn)
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM auth_sessions
+                WHERE username = ? AND expires_at > ?
+                """,
+                (username, now),
+            ).fetchone()
+        return int(row["total"]) if row is not None else 0
 
     def delete_expired_sessions(self, *, conn: sqlite3.Connection | None = None) -> None:
         now = utc_now_text()

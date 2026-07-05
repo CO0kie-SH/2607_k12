@@ -78,6 +78,8 @@ function renderRiskResult(data) {
     `账号: ${data.username || data.session_mark || '-'}`,
     `remote: ${data.remote || '-'}`,
     `近${windowSeconds}秒请求次数(RPM): ${data.request_count ?? '-'}`,
+    `当前账号连接会话数: ${data.websocket_session_count ?? '-'}`,
+    `当前账号登录会话数: ${data.active_session_count ?? '-'}`,
     `可用次数: ${data.usable_count ?? '-'}`,
   ];
   if (data.named_whitelist) lines.push(`白名单: ${data.session_mark || data.username || '命名白名单'}`);

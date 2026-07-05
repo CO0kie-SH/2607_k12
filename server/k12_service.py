@@ -159,6 +159,8 @@ class K12Service:
         workspace_ids: list[str],
         operator_log: str = "",
         progress: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        *,
+        stop_on_success: bool = False,
     ) -> dict[str, Any]:
         token = access_token.strip()
         if not token.startswith("eyJ"):
@@ -170,6 +172,7 @@ class K12Service:
 
         results: list[dict[str, Any]] = []
         accepted_workspace_id = ""
+        accepted_workspace_ids: list[str] = []
         last_attempted_workspace_id = ""
         progress_log: list[str] = []
 
@@ -237,15 +240,20 @@ class K12Service:
             results.append(row)
 
             if row["accept_ok"]:
-                accepted_workspace_id = workspace_id
+                if not accepted_workspace_id:
+                    accepted_workspace_id = workspace_id
+                accepted_workspace_ids.append(workspace_id)
+                message = f"申请{short_id}成功，停止后续申请" if stop_on_success else f"申请{short_id}成功，继续后续申请"
                 await self._progress(
                     apply_progress,
                     "apply_accept_done",
-                    f"申请{short_id}成功，停止后续申请",
-                    {"workspace_id": workspace_id, "result": accept_result},
+                    message,
+                    {"workspace_id": workspace_id, "result": accept_result, "stop_on_success": stop_on_success},
                 )
                 await asyncio.sleep(2.0)
-                break
+                if stop_on_success:
+                    break
+                continue
 
             await self._progress(
                 apply_progress,
@@ -255,8 +263,8 @@ class K12Service:
             )
 
         success = bool(accepted_workspace_id)
-        stopped_by = "first_success" if success else "exhausted"
-        refresh_expected_workspace_id = accepted_workspace_id or last_attempted_workspace_id
+        stopped_by = "first_success" if success and stop_on_success else "completed_with_success" if success else "exhausted"
+        refresh_expected_workspace_id = (accepted_workspace_ids[-1] if accepted_workspace_ids else "") or last_attempted_workspace_id
         await self._progress(apply_progress, "apply_refresh", "刷新账号信息中")
         account_report = await self.inspect_access_token(
             token,
@@ -270,6 +278,7 @@ class K12Service:
             final_workspace_ids = account_report.get("report", {}).get("workspace_ids", [])
             if refresh_expected_workspace_id in final_workspace_ids and not success:
                 accepted_workspace_id = refresh_expected_workspace_id
+                accepted_workspace_ids.append(refresh_expected_workspace_id)
                 success = True
                 stopped_by = "confirmed_after_refresh"
                 for row in results:
@@ -288,7 +297,13 @@ class K12Service:
             apply_progress,
             "apply_done",
             "申请空间流程完成",
-            {"success": success, "accepted_workspace_id": accepted_workspace_id, "stopped_by": stopped_by},
+            {
+                "success": success,
+                "accepted_workspace_id": accepted_workspace_id,
+                "accepted_workspace_ids": accepted_workspace_ids,
+                "stopped_by": stopped_by,
+                "stop_on_success": stop_on_success,
+            },
         )
         final_operator_log = "\n".join(item for item in [operator_log.strip(), "\n".join(progress_log)] if item)
         if final_operator_log:
@@ -297,6 +312,8 @@ class K12Service:
             "success": success,
             "stopped_by": stopped_by,
             "accepted_workspace_id": accepted_workspace_id,
+            "accepted_workspace_ids": accepted_workspace_ids,
+            "stop_on_success": stop_on_success,
             "results": results,
             "account_report": account_report,
         }

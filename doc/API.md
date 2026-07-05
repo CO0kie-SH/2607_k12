@@ -1,6 +1,6 @@
 # K12 工作台 API 文档
 
-版本：`26.7.5L`
+版本：`26.7.5R`
 最后更新：`2026-07-05`
 
 本项目使用 `aiohttp` 提供 HTTP 页面、静态资源、登录接口和 WebSocket JSON-RPC。当前主流程是：登录首页 -> WebSocket 后端版页面 -> K12 账号查询和空间申请。
@@ -14,8 +14,8 @@
 | `GET` | `/html/js` | 否 | 纯前端本地解析页 |
 | `GET` | `/api/status` | Cookie | 服务状态 |
 | `GET` | `/api/auth/me` | Cookie | 当前登录态 |
-| `POST` | `/api/auth/query` | 账号密码或白名单账号 | 查询账号并返回 remote、RPM 和可用次数 |
-| `POST` | `/api/auth/login` | 账号密码或白名单账号 | 登录并写入 session cookie，返回一次性 entry token |
+| `POST` | `/api/auth/query` | 账号密码或白名单账号 | 查询账号并返回 remote、RPM、会话数和可用次数 |
+| `POST` | `/api/auth/login` | 账号密码或白名单账号 | 登录并写入 session cookie，返回一次性 entry token 和会话数 |
 | `POST` | `/api/auth/logout` | Cookie | 退出登录 |
 | `GET` | `/ws` | Cookie + Origin | WebSocket JSON-RPC |
 | `GET` | `/static/*` | 否 | 静态资源 |
@@ -132,7 +132,7 @@ auth_risk_events
 
 ### `POST /api/auth/query`
 
-校验账号密码，前端返回有效 `remote`、近 60 秒请求次数 RPM 和账号可用次数。完整 headers 会写入后端服务日志，不返回给前端。该接口会把有效 `remote`、`CF-Connecting-IP`、原始 socket remote、`Forwarded`、`User-Agent` 等维度写入 `auth_risk_fingerprints`，并在 `auth_risk_events` 中记录请求事件，便于后续扩展风控。
+校验账号密码，前端返回有效 `remote`、近 60 秒请求次数 RPM、账号会话数和账号可用次数。完整 headers 会写入后端服务日志，不返回给前端。该接口会把有效 `remote`、`CF-Connecting-IP`、原始 socket remote、`Forwarded`、`User-Agent` 等维度写入 `auth_risk_fingerprints`，并在 `auth_risk_events` 中记录请求事件，便于后续扩展风控。
 
 Cloudflare 部署下，服务端优先使用 `CF-Connecting-IP` 作为有效 `remote`。`X-Forwarded-For` 和 `X-Real-IP` 中的 CF IPv6 只保留在服务端 headers 日志中，不作为判断 IP，也不参与 RPM 的 `remote` 维度。
 
@@ -159,9 +159,16 @@ Cloudflare 部署下，服务端优先使用 `CF-Connecting-IP` 作为有效 `re
   "is_active": true,
   "remote": "127.0.0.1",
   "request_count": 1,
-  "window_seconds": 60
+  "window_seconds": 60,
+  "active_session_count": 0,
+  "websocket_session_count": 0
 }
 ```
+
+字段说明：
+
+- `active_session_count`：SQLite 中该账号未过期的登录 session 数。
+- `websocket_session_count`：当前后端进程内该账号正在连接的 WebSocket 数。
 
 失败响应：
 
@@ -205,7 +212,9 @@ Cloudflare 部署下，服务端优先使用 `CF-Connecting-IP` 作为有效 `re
   "workspace_csv": "ff598c4d-ccaf-40c1-bfaa-cb94565764b1,k12,gmail.com,true",
   "remote": "127.0.0.1",
   "request_count": 2,
-  "window_seconds": 60
+  "window_seconds": 60,
+  "active_session_count": 1,
+  "websocket_session_count": 0
 }
 ```
 
@@ -247,7 +256,9 @@ Set-Cookie: k12_session=<token>; HttpOnly; Path=/; SameSite=Lax; Max-Age=43200
 {
   "authenticated": true,
   "username": "admin",
-  "usable_count": 100
+  "usable_count": 100,
+  "active_session_count": 1,
+  "websocket_session_count": 0
 }
 ```
 
@@ -355,6 +366,10 @@ Origin 不匹配时：
 
 已登录时建立 WebSocket，并立即收到 `server.hello`。WebSocket 建立后，每次 JSON-RPC 请求前都会重新检查当前 session；如果 session 已被删除或过期，服务端返回 `login required` 并关闭连接。
 
+白名单账号或本机白名单登录进入 WebSocket 后，会启用空闲限时会话：普通连接前端根据 `server.hello.params.session.client_timeout_seconds=600` 在累计空闲 600 秒后主动退出；如果前端没有断开，后端会在累计空闲 `server_timeout_seconds=610` 后删除 session 并用关闭码 `4001` 关闭连接。`Host=127.0.0.1` 或有效客户端 IP 为 `127.0.0.1` 时使用本地超时档，前端 1800 秒主动断开，后端 1810 秒兜底断开。查询、申请、保存日志等 RPC 任务执行期间，前端和后端都暂停累计空闲时间。
+
+服务端不启用 aiohttp WebSocket heartbeat，避免长 RPC 执行期间未读取 pong 导致连接被误判断开；会话回收由上述空闲计时和每次 RPC 前的 session 校验负责。
+
 ## 工作台前端按钮
 
 ### 打开网页
@@ -459,7 +474,16 @@ ws://127.0.0.1:8088/ws
   "params": {
     "auth": {
       "username": "admin",
-      "usable_count": 100
+      "usable_count": 100,
+      "active_session_count": 1,
+      "websocket_session_count": 1
+    },
+    "session": {
+      "whitelist": false,
+      "timeout_mode": "",
+      "timeout_profile": "",
+      "client_timeout_seconds": 0,
+      "server_timeout_seconds": 0
     },
     "k12_proxy": "http://127.0.0.1:7897",
     "k12_latest": {},
@@ -469,6 +493,8 @@ ws://127.0.0.1:8088/ws
 ```
 
 直连模式下 `k12_proxy` 为 `null`。
+
+白名单登录时 `session.whitelist=true`，`timeout_mode=idle`。普通连接返回 `timeout_profile=default`、`client_timeout_seconds=600`、`server_timeout_seconds=610`；`Host=127.0.0.1` 或有效客户端 IP 为 `127.0.0.1` 时返回 `timeout_profile=local_127`、`client_timeout_seconds=1800`、`server_timeout_seconds=1810`。后端兜底关闭前会尝试推送 `server.session_closed` notification。
 
 ## K12 RPC 方法
 
@@ -538,7 +564,7 @@ ws://127.0.0.1:8088/ws
 
 ### `k12.apply_workspaces`
 
-提交 AT 和 workspace ID 列表，后端逐个申请空间，首个成功后停止。
+提交 AT 和 workspace ID 列表，后端逐个申请空间。默认会继续尝试后续空间；传入 `stop_on_success=true` 时，首个成功后停止。
 
 请求：
 
@@ -553,6 +579,7 @@ ws://127.0.0.1:8088/ws
       "b49cd6d8-b52d-4c21-93d7-89cc19b5e18e",
       "eb6642e8-b4a6-4652-9c18-67099f2781cc"
     ],
+    "stop_on_success": false,
     "operator_log": "..."
   }
 }
@@ -577,21 +604,27 @@ ws://127.0.0.1:8088/ws
   - `POST /backend-api/accounts/{workspace_id}/invites/request`
   - `POST /backend-api/accounts/{workspace_id}/invites/accept`
 - `request` 成功后等待 1.5 秒再 `accept`。
-- `accept` 成功后等待 2 秒，再刷新账号信息。
+- `accept` 成功后等待 2 秒；默认继续尝试后续空间，`stop_on_success=true` 时停止后续申请。
 - 刷新账号空间列表时，如果申请 ID 暂未出现，延迟 1 秒后再次请求 `/backend-api/accounts`，最多请求 3 次。
 - 如果 `request` 表面失败但刷新后确认空间已加入，返回 `stopped_by=confirmed_after_refresh`。
 - 前端会额外对比申请前后的 workspace 列表；如果后端返回失败但刷新报告出现新增空间，页面结果栏用绿色提示新增空间 ID。
 - 新增空间相关日志会使用 `■■■【新增空间】■■■` 标记；操作日志区域是 `textarea`，不支持单行富文本颜色。
-- 成功一个即停。
+- 默认不会成功即停；只有 `stop_on_success=true` 时成功一个即停。
 - 将申请过程追加保存到 `log/k12_operator.log`。
+
+前端调用该 RPC 时会按候选数量动态设置超时，最少 10 分钟、最多 45 分钟，避免长列表申请时本地 180 秒超时导致页面提前断开。
 
 响应摘要：
 
 ```json
 {
   "success": true,
-  "stopped_by": "first_success",
+  "stopped_by": "completed_with_success",
   "accepted_workspace_id": "b49cd6d8-b52d-4c21-93d7-89cc19b5e18e",
+  "accepted_workspace_ids": [
+    "b49cd6d8-b52d-4c21-93d7-89cc19b5e18e"
+  ],
+  "stop_on_success": false,
   "results": [
     {
       "workspace_id": "b49cd6d8-b52d-4c21-93d7-89cc19b5e18e",
@@ -688,6 +721,7 @@ ws://127.0.0.1:8088/ws
 | 方法 | 说明 |
 | --- | --- |
 | `server.hello` | WebSocket 连接后的初始化状态 |
+| `server.session_closed` | 白名单 WebSocket 会话后端兜底关闭前的通知 |
 | `k12.progress` | 查询 AT 的阶段进度 |
 | `k12.report` | 查询完成后的账号报告 |
 | `k12.apply_progress` | 申请空间的阶段进度 |
@@ -751,7 +785,7 @@ c4d1df5b-81cd-445d-a5ea-4131a0fbb9d2,k12,outlook.com,true,
 匹配规则：
 
 - 第 1 列是实际提交给后端的 workspace ID。
-- 第 3 列是邮箱后缀。
+- 第 3 列是邮箱后缀；为空或 `*` 表示任意邮箱后缀都可匹配。
 - 第 4 列必须为 `true` 才会参与申请。
 - 如果 AT 邮箱是 `xxx@outlook.com`，只申请第 3 列为 `outlook.com` 的行。
 - 如果匹配后的空间 ID 包含当前 AT 的账号 ID，前端提示“请用个人空间的AT进行申请”，只跳过该 ID，并继续提交其它候选空间。
@@ -767,8 +801,8 @@ c4d1df5b-81cd-445d-a5ea-4131a0fbb9d2,k12,outlook.com,true,
 - `python -B -m py_compile server/app.py server/auth_service.py server/k12_service.py tool/base_http_client.py tool/curl_cffi_client.py main.py`
 - 未登录访问 `/html/websocket` 返回 `302 /?session=expired`
 - 未登录连接 `/ws` 返回 `401`
-- `/api/auth/query` 不返回 headers，只返回 `remote`、近 60 秒 RPM 和可用次数。
-- `/api/auth/login` 登录成功并返回一次性 `entry_token`。
+- `/api/auth/query` 不返回 headers，只返回 `remote`、近 60 秒 RPM、会话数和可用次数。
+- `/api/auth/login` 登录成功并返回一次性 `entry_token`、会话数。
 - `/api/auth/login` 响应包含启动时缓存的 `workspace_csv`。
 - `username=im-run`、`username=linux.do` 无需密码即可查询和登录，仍返回 RPM 信息。
 - K12 查询、保存日志和状态接口的前端响应不包含本地 `*.json` / `*.log` 路径。
@@ -776,6 +810,7 @@ c4d1df5b-81cd-445d-a5ea-4131a0fbb9d2,k12,outlook.com,true,
 - 重复访问或刷新同一个 `/html/websocket?entry=...` 会删除 session 并回到首页。
 - `/ws` 缺失 `Origin` 或 Origin 不在白名单时返回 `403`。
 - `/ws` 携带白名单 Origin 且已登录时收到 `server.hello`。
+- 白名单 WebSocket 会话普通连接累计空闲 600 秒前端主动断开，后端累计空闲 610 秒兜底断开；本地 127.0.0.1 连接为 1800/1810 秒。
 - 登录后连接 `/ws` 收到 `server.hello`。
 - 工作台页面包含“打开网页”和“退出空间”按钮。
 - “打开网页”目标为 `https://chatgpt.com/api/auth/session`。

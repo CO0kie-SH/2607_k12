@@ -92,6 +92,22 @@ p { margin-top: 6px; color: var(--muted); }
   flex-wrap: wrap;
 }
 
+.checkbox-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.checkbox-control input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
 button {
   border: 1px solid #0d9488;
   background: var(--accent);
@@ -339,6 +355,10 @@ textarea:focus {
 
   .panel-actions,
   .panel-actions button {
+    width: 100%;
+  }
+
+  .checkbox-control {
     width: 100%;
   }
 }

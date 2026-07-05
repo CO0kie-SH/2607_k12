@@ -1,4 +1,19 @@
-const state = { rpcId: 1, pending: new Map(), ws: null, latest: null, accessToken: '', profile: null };
+const state = {
+  rpcId: 1,
+  pending: new Map(),
+  ws: null,
+  latest: null,
+  accessToken: '',
+  profile: null,
+  whitelistSessionTimer: null,
+  whitelistSession: {
+    enabled: false,
+    clientTimeoutMs: 0,
+    idleElapsedMs: 0,
+    idleStartedAt: 0,
+    activeTasks: 0,
+  },
+};
 let sessionEnding = false;
 const PERSONAL_SPACE_AT_MESSAGE = '请用个人空间的AT进行申请';
 const DEACTIVATED_WORKSPACE_MESSAGE = '请勿使用停用的空间进行申请';
@@ -37,6 +52,82 @@ function sanitizeLocalPaths(text) {
   return String(text || '').replace(LOCAL_PATH_RE, '[server-path]');
 }
 
+function clearWhitelistSessionTimer() {
+  if (!state.whitelistSessionTimer) return;
+  window.clearTimeout(state.whitelistSessionTimer);
+  state.whitelistSessionTimer = null;
+}
+
+function resetWhitelistSessionTimeout() {
+  clearWhitelistSessionTimer();
+  state.whitelistSession = {
+    enabled: false,
+    clientTimeoutMs: 0,
+    idleElapsedMs: 0,
+    idleStartedAt: 0,
+    activeTasks: 0,
+  };
+}
+
+function whitelistIdleElapsedMs() {
+  const session = state.whitelistSession;
+  if (!session.enabled) return 0;
+  if (session.activeTasks > 0 || !session.idleStartedAt) return session.idleElapsedMs;
+  return session.idleElapsedMs + Math.max(0, Date.now() - session.idleStartedAt);
+}
+
+function armWhitelistSessionTimer() {
+  clearWhitelistSessionTimer();
+  const session = state.whitelistSession;
+  if (!session.enabled || session.activeTasks > 0) return;
+  const remainingMs = session.clientTimeoutMs - whitelistIdleElapsedMs();
+  if (remainingMs <= 0) {
+    endSessionAndReturnHome('白名单会话已到期，请重新登录');
+    return;
+  }
+  state.whitelistSessionTimer = window.setTimeout(() => {
+    state.whitelistSessionTimer = null;
+    endSessionAndReturnHome('白名单会话已到期，请重新登录');
+  }, remainingMs);
+}
+
+function scheduleWhitelistSessionTimeout(session) {
+  resetWhitelistSessionTimeout();
+  if (!session || !session.whitelist) return;
+  const seconds = Number(session.client_timeout_seconds || 600);
+  if (!Number.isFinite(seconds) || seconds <= 0) return;
+  state.whitelistSession = {
+    enabled: true,
+    clientTimeoutMs: seconds * 1000,
+    idleElapsedMs: 0,
+    idleStartedAt: Date.now(),
+    activeTasks: 0,
+  };
+  armWhitelistSessionTimer();
+}
+
+function pauseWhitelistSessionTimer() {
+  const session = state.whitelistSession;
+  if (!session.enabled) return false;
+  if (session.activeTasks === 0) {
+    session.idleElapsedMs = whitelistIdleElapsedMs();
+    session.idleStartedAt = 0;
+    clearWhitelistSessionTimer();
+  }
+  session.activeTasks += 1;
+  return true;
+}
+
+function resumeWhitelistSessionTimer() {
+  const session = state.whitelistSession;
+  if (!session.enabled || session.activeTasks <= 0) return;
+  session.activeTasks -= 1;
+  if (session.activeTasks === 0) {
+    session.idleStartedAt = Date.now();
+    armWhitelistSessionTimer();
+  }
+}
+
 function closeCurrentWebSocket() {
   if (!state.ws || state.ws.readyState > WebSocket.OPEN) return;
   state.ws.close(1000, 'session ended');
@@ -45,6 +136,7 @@ function closeCurrentWebSocket() {
 function sendLogoutBeacon() {
   if (sessionEnding) return;
   sessionEnding = true;
+  resetWhitelistSessionTimeout();
   closeCurrentWebSocket();
   try {
     if (navigator.sendBeacon) {
@@ -67,6 +159,7 @@ async function endSessionAndReturnHome(reason = '会话已结束') {
     return;
   }
   sessionEnding = true;
+  resetWhitelistSessionTimeout();
   setStatus(reason, false);
   setApplyEnabled(false);
   closeCurrentWebSocket();
@@ -254,14 +347,26 @@ function rpc(method, params = {}, timeoutMs = 120000) {
     return Promise.reject(new Error('WebSocket 未连接'));
   }
   const id = state.rpcId++;
-  state.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+  const pausesWhitelistSession = pauseWhitelistSessionTimer();
+  try {
+    state.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+  } catch (err) {
+    if (pausesWhitelistSession) resumeWhitelistSessionTimer();
+    return Promise.reject(err);
+  }
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
       state.pending.delete(id);
+      if (pausesWhitelistSession) resumeWhitelistSessionTimer();
       reject(new Error(`RPC 请求超时: ${method}`));
     }, timeoutMs);
-    state.pending.set(id, { resolve, reject, timer });
+    state.pending.set(id, { resolve, reject, timer, pausesWhitelistSession });
   });
+}
+
+function applyTimeoutMs(workspaceCount) {
+  const count = Math.max(1, Number(workspaceCount) || 1);
+  return Math.min(45 * 60 * 1000, Math.max(10 * 60 * 1000, count * 10 * 1000 + 3 * 60 * 1000));
 }
 
 function workspaceEntriesFromInput() {
@@ -287,7 +392,7 @@ function workspaceIdsForProfile(profile) {
   const entries = workspaceEntriesFromInput();
   const matched = entries.filter(item => {
     if (!item.id || !item.available) return false;
-    if (!item.emailSuffix) return true;
+    if (!item.emailSuffix || item.emailSuffix === '*') return true;
     return Boolean(domain) && domain === item.emailSuffix;
   });
   return {
@@ -414,10 +519,11 @@ async function applyWorkspaces() {
   }
 
   const btn = $('reload-btn');
+  const stopOnSuccess = $('stop-on-success').checked;
   btn.disabled = true;
   btn.classList.add('running');
   appendOperatorLog(`邮箱后缀${domain || '-'}匹配可申请空间${workspaceIds.length}个${skipped ? `，跳过${skipped}个` : ''}${selfMatchedIds.length ? `，跳过账号自身${selfMatchedIds.length}个` : ''}${existingMatchedIds.length ? `，已存在${existingMatchedIds.length}个` : ''}`);
-  appendOperatorLog(`开始申请空间，共${applyWorkspaceIds.length}个`);
+  appendOperatorLog(`开始申请空间，共${applyWorkspaceIds.length}个${stopOnSuccess ? '，成功后停止' : '，成功后继续申请'}`);
   setResult('申请空间中...', 'busy');
 
   try {
@@ -425,14 +531,18 @@ async function applyWorkspaces() {
       access_token: state.accessToken,
       workspace_ids: applyWorkspaceIds,
       operator_log: sanitizeLocalPaths($('operator-log').value),
-    }, 180000);
+      stop_on_success: stopOnSuccess,
+    }, applyTimeoutMs(applyWorkspaceIds.length));
     const addedWorkspaceIds = result.account_report ? workspaceDiff(beforeApplyWorkspaceIds, result.account_report) : [];
     if (result.account_report) setAccountInfo(result.account_report);
     if (result.success) {
-      appendOperatorLog(`申请${result.accepted_workspace_id}成功，流程结束`);
+      const acceptedIds = Array.isArray(result.accepted_workspace_ids) && result.accepted_workspace_ids.length
+        ? result.accepted_workspace_ids
+        : [result.accepted_workspace_id].filter(Boolean);
+      appendOperatorLog(`申请成功${acceptedIds.length ? `: ${acceptedIds.join(', ')}` : ''}，流程结束`);
       if (addedWorkspaceIds.length) appendOperatorLog(`${ADDED_WORKSPACE_MARK}刷新后检测到新增空间: ${addedWorkspaceIds.join(', ')}`);
       if (result.account_report) appendWorkspaceDetailLogs(result.account_report, addedWorkspaceIds);
-      setResult(addedWorkspaceIds.length ? `${ADDED_WORKSPACE_MARK}申请成功，新增空间: ${addedWorkspaceIds.join(', ')}` : `申请成功: ${result.accepted_workspace_id}`, 'ok');
+      setResult(addedWorkspaceIds.length ? `${ADDED_WORKSPACE_MARK}申请成功，新增空间: ${addedWorkspaceIds.join(', ')}` : `申请成功: ${acceptedIds.join(', ') || result.accepted_workspace_id}`, 'ok');
     } else if (addedWorkspaceIds.length) {
       appendOperatorLog(`${ADDED_WORKSPACE_MARK}申请接口返回失败，但刷新后检测到新增空间: ${addedWorkspaceIds.join(', ')}`);
       if (result.account_report) appendWorkspaceDetailLogs(result.account_report, addedWorkspaceIds);
@@ -466,8 +576,9 @@ function connectWs() {
     setStatus('WebSocket 已连接', true);
   };
   ws.onclose = (event) => {
+    resetWhitelistSessionTimeout();
     if (sessionEnding) return;
-    if (event.code === 1008 || event.code === 1006) {
+    if (event.code === 1008 || event.code === 1006 || event.code === 4001) {
       setStatus('未登录或会话已过期', false);
       if (!sessionEnding) {
         window.setTimeout(() => location.replace('/?session=expired'), 500);
@@ -484,10 +595,18 @@ function connectWs() {
       const pending = state.pending.get(msg.id);
       state.pending.delete(msg.id);
       window.clearTimeout(pending.timer);
+      if (pending.pausesWhitelistSession) resumeWhitelistSessionTimer();
       msg.error ? pending.reject(msg.error) : pending.resolve(msg.result);
       return;
     }
-    if (msg.method === 'server.hello') $('account-info').value = '';
+    if (msg.method === 'server.hello') {
+      $('account-info').value = '';
+      scheduleWhitelistSessionTimeout(msg.params?.session);
+    }
+    if (msg.method === 'server.session_closed') {
+      endSessionAndReturnHome(msg.params?.message || '会话已结束，请重新登录');
+      return;
+    }
     if (msg.method === 'k12.progress') appendProgress(msg.params);
     if (msg.method === 'k12.report') setAccountInfo(msg.params);
     if (msg.method === 'k12.log') setResult('日志已保存', 'ok');

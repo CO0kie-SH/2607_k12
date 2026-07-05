@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
 import re
+from contextlib import suppress
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,10 @@ DEFAULT_ALLOWED_ORIGINS = (
 )
 LOCAL_WHITELIST_REMOTE = "127.0.0.1"
 WINDOWS_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s\r\n\"']+")
+WHITELIST_WS_CLIENT_TIMEOUT_SECONDS = 600
+LOCAL_WHITELIST_WS_CLIENT_TIMEOUT_SECONDS = 1800
+WHITELIST_WS_SERVER_GRACE_SECONDS = 10
+WHITELIST_WS_TIMEOUT_CHECK_INTERVAL_SECONDS = 1.0
 
 
 def setup_logging(log_dir: Path) -> logging.Logger:
@@ -111,6 +117,13 @@ def normalize_origin(origin: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}".lower()
 
 
+def host_name_from_header(host: str) -> str:
+    host = host.strip()
+    if not host:
+        return ""
+    return (urlsplit(f"//{host}").hostname or "").lower()
+
+
 def parse_allowed_origins(value: str | None) -> tuple[str, ...]:
     if value is None:
         return DEFAULT_ALLOWED_ORIGINS
@@ -157,6 +170,51 @@ def named_whitelist_username(username: str) -> str:
         if normalized == item.lower():
             return item
     return ""
+
+
+def is_whitelist_account(username: str) -> bool:
+    username = username.strip()
+    return username == LOCAL_WHITELIST_USERNAME or bool(named_whitelist_username(username))
+
+
+def whitelist_ws_timeout_config(request: web.Request) -> dict[str, Any]:
+    headers_snapshot = request_headers_snapshot(request)
+    host_name = host_name_from_header(request.headers.get("Host", ""))
+    effective_remote = str(headers_snapshot.get("remote") or "")
+    socket_remote = str(headers_snapshot.get("socket_remote") or request.remote or "")
+    local_timeout = host_name == LOCAL_WHITELIST_REMOTE or effective_remote == LOCAL_WHITELIST_REMOTE or socket_remote == LOCAL_WHITELIST_REMOTE
+    client_timeout_seconds = LOCAL_WHITELIST_WS_CLIENT_TIMEOUT_SECONDS if local_timeout else WHITELIST_WS_CLIENT_TIMEOUT_SECONDS
+    return {
+        "profile": "local_127" if local_timeout else "default",
+        "client_timeout_seconds": client_timeout_seconds,
+        "server_timeout_seconds": client_timeout_seconds + WHITELIST_WS_SERVER_GRACE_SECONDS,
+    }
+
+
+def websocket_session_count(app: web.Application, username: str) -> int:
+    username = username.strip()
+    if not username:
+        return 0
+    client_users: dict[web.WebSocketResponse, str] = app["client_users"]
+    dead: list[web.WebSocketResponse] = []
+    total = 0
+    for ws, ws_username in list(client_users.items()):
+        if ws.closed:
+            dead.append(ws)
+            continue
+        if ws_username == username:
+            total += 1
+    for ws in dead:
+        client_users.pop(ws, None)
+        app["clients"].discard(ws)
+    return total
+
+
+def auth_session_counts(app: web.Application, username: str) -> dict[str, int]:
+    return {
+        "active_session_count": app["auth"].active_session_count(username),
+        "websocket_session_count": websocket_session_count(app, username),
+    }
 
 
 def is_workspace_csv_header(line: str) -> bool:
@@ -250,6 +308,7 @@ async def api_auth_query(request: web.Request) -> web.Response:
         json.dumps(headers_snapshot, ensure_ascii=False, separators=(",", ":")),
     )
     if named_whitelisted or local_whitelisted:
+        counts = auth_session_counts(request.app, whitelist_username)
         return web.json_response(
             {
                 "ok": True,
@@ -262,6 +321,7 @@ async def api_auth_query(request: web.Request) -> web.Response:
                 "session_mark": whitelist_username,
                 "local_whitelist": local_whitelisted,
                 "named_whitelist": named_whitelisted,
+                **counts,
             }
         )
     if user is None:
@@ -275,6 +335,7 @@ async def api_auth_query(request: web.Request) -> web.Response:
             },
             status=401,
         )
+    counts = auth_session_counts(request.app, user.username)
     return web.json_response(
         {
             "ok": True,
@@ -284,6 +345,7 @@ async def api_auth_query(request: web.Request) -> web.Response:
             "remote": risk.remote,
             "request_count": risk.request_count,
             "window_seconds": risk.window_seconds,
+            **counts,
         }
     )
 
@@ -329,6 +391,7 @@ async def api_auth_login(request: web.Request) -> web.Response:
             status=401,
         )
     token, entry_token, user = login_result
+    counts = auth_session_counts(request.app, user.username)
     response = web.json_response(
         {
             "ok": True,
@@ -342,6 +405,7 @@ async def api_auth_login(request: web.Request) -> web.Response:
             "local_whitelist": local_whitelisted,
             "named_whitelist": named_whitelisted,
             "workspace_csv": request.app["workspace_csv_content"],
+            **counts,
         }
     )
     response.set_cookie(
@@ -364,6 +428,7 @@ async def api_auth_me(request: web.Request) -> web.Response:
             "authenticated": True,
             "username": user.username,
             "usable_count": user.usable_count,
+            **auth_session_counts(request.app, user.username),
         }
     )
 
@@ -399,6 +464,7 @@ async def handle_rpc(request: web.Request, req: dict[str, Any]) -> dict[str, Any
         access_token = str(params.get("access_token", "")).strip()
         workspace_ids = params.get("workspace_ids") or []
         operator_log = str(params.get("operator_log", ""))
+        stop_on_success = params.get("stop_on_success") is True
         if not isinstance(workspace_ids, list):
             return jsonrpc.error(rpc_id, -32602, "workspace_ids must be a list")
 
@@ -411,6 +477,7 @@ async def handle_rpc(request: web.Request, req: dict[str, Any]) -> dict[str, Any
                 [str(item) for item in workspace_ids],
                 operator_log,
                 progress=progress,
+                stop_on_success=stop_on_success,
             )
         except Exception as exc:
             await progress({"stage": "error", "message": f"申请空间失败: {repr(exc)}", "data": {}, "time": jsonrpc.now_ms()})
@@ -434,6 +501,86 @@ async def handle_rpc(request: web.Request, req: dict[str, Any]) -> dict[str, Any
     return jsonrpc.error(rpc_id, -32601, f"Method not found: {method}")
 
 
+async def close_whitelist_ws_after_timeout(
+    app: web.Application,
+    ws: web.WebSocketResponse,
+    token: str,
+    username: str,
+    timeout_state: dict[str, Any],
+    client_timeout_seconds: int,
+    server_timeout_seconds: int,
+) -> None:
+    while not ws.closed:
+        await asyncio.sleep(WHITELIST_WS_TIMEOUT_CHECK_INTERVAL_SECONDS)
+        if int(timeout_state.get("active_tasks") or 0) > 0:
+            continue
+        now = asyncio.get_running_loop().time()
+        idle_started_at = float(timeout_state.get("idle_started_at") or now)
+        idle_elapsed = float(timeout_state.get("idle_elapsed_seconds") or 0.0) + max(0.0, now - idle_started_at)
+        if idle_elapsed < server_timeout_seconds:
+            continue
+        timeout_state["idle_elapsed_seconds"] = idle_elapsed
+        break
+    if ws.closed:
+        return
+    app["logger"].warning(
+        "whitelist websocket timeout user=%s client_timeout=%s server_timeout=%s idle_elapsed=%.3f",
+        username,
+        client_timeout_seconds,
+        server_timeout_seconds,
+        float(timeout_state.get("idle_elapsed_seconds") or 0.0),
+    )
+    with suppress(Exception):
+        await send_json(
+            ws,
+            jsonrpc.notification(
+                "server.session_closed",
+                {
+                    "message": "白名单会话已到期，请重新登录",
+                    "reason": "whitelist_session_timeout",
+                    "client_timeout_seconds": client_timeout_seconds,
+                    "server_timeout_seconds": server_timeout_seconds,
+                },
+            ),
+        )
+    with suppress(Exception):
+        app["auth"].logout(token)
+    with suppress(Exception):
+        await ws.close(code=4001, message=b"whitelist session timeout")
+
+
+def make_whitelist_timeout_state() -> dict[str, Any]:
+    return {
+        "active_tasks": 0,
+        "idle_started_at": asyncio.get_running_loop().time(),
+        "idle_elapsed_seconds": 0.0,
+    }
+
+
+def pause_whitelist_idle_timer(timeout_state: dict[str, Any] | None) -> None:
+    if timeout_state is None:
+        return
+    active_tasks = int(timeout_state.get("active_tasks") or 0)
+    now = asyncio.get_running_loop().time()
+    if active_tasks == 0:
+        idle_started_at = float(timeout_state.get("idle_started_at") or now)
+        timeout_state["idle_elapsed_seconds"] = float(timeout_state.get("idle_elapsed_seconds") or 0.0) + max(
+            0.0,
+            now - idle_started_at,
+        )
+        timeout_state["idle_started_at"] = None
+    timeout_state["active_tasks"] = active_tasks + 1
+
+
+def resume_whitelist_idle_timer(timeout_state: dict[str, Any] | None) -> None:
+    if timeout_state is None:
+        return
+    active_tasks = max(0, int(timeout_state.get("active_tasks") or 0) - 1)
+    timeout_state["active_tasks"] = active_tasks
+    if active_tasks == 0:
+        timeout_state["idle_started_at"] = asyncio.get_running_loop().time()
+
+
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     if not is_allowed_ws_origin(request):
         request.app["logger"].warning(
@@ -450,49 +597,105 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         request.app["logger"].warning("blocked unauthenticated websocket remote=%s", request.remote)
         raise web.HTTPUnauthorized(text="login required")
 
-    ws = web.WebSocketResponse(heartbeat=120)
+    ws = web.WebSocketResponse()
     await ws.prepare(request)
+    session_token = request.cookies.get(SESSION_COOKIE, "")
+    whitelist_session = is_whitelist_account(user.username)
+    timeout_config = whitelist_ws_timeout_config(request) if whitelist_session else {
+        "profile": "",
+        "client_timeout_seconds": 0,
+        "server_timeout_seconds": 0,
+    }
+    whitelist_timeout_state = make_whitelist_timeout_state() if whitelist_session else None
+    timeout_task: asyncio.Task[None] | None = None
     request.app["clients"].add(ws)
-    request.app["logger"].info("frontend ws connected user=%s clients=%s", user.username, len(request.app["clients"]))
-
-    await send_json(
-        ws,
-        jsonrpc.notification(
-            "server.hello",
-            {
-                "auth": {"username": user.username, "usable_count": user.usable_count},
-                "k12_proxy": request.app["k12_proxy"],
-                "k12_latest": request.app["k12"].latest_report(),
-                "clients": len(request.app["clients"]),
-            },
-        ),
+    request.app["client_users"][ws] = user.username
+    if whitelist_session:
+        timeout_task = asyncio.create_task(
+            close_whitelist_ws_after_timeout(
+                request.app,
+                ws,
+                session_token,
+                user.username,
+                whitelist_timeout_state,
+                int(timeout_config["client_timeout_seconds"]),
+                int(timeout_config["server_timeout_seconds"]),
+            )
+        )
+    request.app["logger"].info(
+        "frontend ws connected user=%s whitelist_session=%s timeout_profile=%s client_timeout=%s server_timeout=%s clients=%s",
+        user.username,
+        whitelist_session,
+        timeout_config["profile"],
+        timeout_config["client_timeout_seconds"],
+        timeout_config["server_timeout_seconds"],
+        len(request.app["clients"]),
     )
 
-    async for msg in ws:
-        if msg.type == WSMsgType.TEXT:
-            req: dict[str, Any] | None = None
-            try:
-                req = json.loads(msg.data)
-                if auth_user(request) is None:
-                    request.app["logger"].warning("blocked websocket rpc after session expired remote=%s", request.remote)
-                    await send_json(
-                        ws,
-                        jsonrpc.error(req.get("id") if isinstance(req, dict) else None, -32001, "login required"),
-                    )
-                    await ws.close(code=1008, message=b"login required")
-                    break
-                payload = await handle_rpc(request, req)
-            except json.JSONDecodeError:
-                payload = jsonrpc.error(None, -32700, "Parse error")
-            except Exception as exc:
-                request.app["logger"].exception("ws rpc error")
-                payload = jsonrpc.error(req.get("id") if isinstance(req, dict) else None, -32603, repr(exc))
-            await send_json(ws, payload)
-        elif msg.type == WSMsgType.ERROR:
-            break
+    try:
+        await send_json(
+            ws,
+            jsonrpc.notification(
+                "server.hello",
+                {
+                    "auth": {
+                        "username": user.username,
+                        "usable_count": user.usable_count,
+                        **auth_session_counts(request.app, user.username),
+                    },
+                    "session": {
+                        "whitelist": whitelist_session,
+                        "timeout_mode": "idle" if whitelist_session else "",
+                        "timeout_profile": timeout_config["profile"],
+                        "client_timeout_seconds": timeout_config["client_timeout_seconds"],
+                        "server_timeout_seconds": timeout_config["server_timeout_seconds"],
+                    },
+                    "k12_proxy": request.app["k12_proxy"],
+                    "k12_latest": request.app["k12"].latest_report(),
+                    "clients": len(request.app["clients"]),
+                },
+            ),
+        )
 
-    request.app["clients"].discard(ws)
-    request.app["logger"].info("frontend ws disconnected clients=%s", len(request.app["clients"]))
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                req: dict[str, Any] | None = None
+                try:
+                    req = json.loads(msg.data)
+                    if auth_user(request) is None:
+                        request.app["logger"].warning("blocked websocket rpc after session expired remote=%s", request.remote)
+                        await send_json(
+                            ws,
+                            jsonrpc.error(req.get("id") if isinstance(req, dict) else None, -32001, "login required"),
+                        )
+                        await ws.close(code=1008, message=b"login required")
+                        break
+                    pause_whitelist_idle_timer(whitelist_timeout_state)
+                    try:
+                        payload = await handle_rpc(request, req)
+                    finally:
+                        resume_whitelist_idle_timer(whitelist_timeout_state)
+                except json.JSONDecodeError:
+                    payload = jsonrpc.error(None, -32700, "Parse error")
+                except Exception as exc:
+                    request.app["logger"].exception("ws rpc error")
+                    payload = jsonrpc.error(req.get("id") if isinstance(req, dict) else None, -32603, repr(exc))
+                await send_json(ws, payload)
+            elif msg.type == WSMsgType.ERROR:
+                break
+    finally:
+        if timeout_task is not None and not timeout_task.done():
+            timeout_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await timeout_task
+        request.app["clients"].discard(ws)
+        request.app["client_users"].pop(ws, None)
+        request.app["logger"].info(
+            "frontend ws disconnected clients=%s close_code=%s exception=%r",
+            len(request.app["clients"]),
+            ws.close_code,
+            ws.exception(),
+        )
     return ws
 
 
@@ -566,6 +769,7 @@ def create_app(
     app["workspace_csv_content"] = ""
     app["allowed_origins"] = tuple(origin for origin in (normalize_origin(item) for item in allowed_origins) if origin)
     app["clients"] = set()
+    app["client_users"] = {}
     app.router.add_get("/", index)
     app.router.add_get("/html/websocket", websocket_page)
     app.router.add_get("/html/js", js_page)

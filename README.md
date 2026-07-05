@@ -1,6 +1,6 @@
 # K12 空间申请 Web 工作台
 
-当前版本：`26.7.5L`
+当前版本：`26.7.5R`
 最后更新：`2026-07-05`
 
 这是一个基于 `aiohttp` 的 K12 空间申请 Web 工作台。主流程通过登录页进入 WebSocket 后端版页面，后端使用 `curl_cffi` 以可配置代理或直连模式查询账号信息、申请空间、导出 JSON 报告并保存操作日志。
@@ -10,7 +10,7 @@ AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 
 ## 本版说明
 
-`26.7.5L` 是当前版本，主线功能为：账号登录、命名白名单账号、启动时缓存 `k12.csv` 空间列表、自动忽略 CSV 表头、一次性工作台会话、WebSocket Origin 白名单、AT 查询、按邮箱后缀申请空间、重复申请前端拦截、申请前异常空间校验、申请后新增空间高亮提示、前端路径隐私脱敏、Cloudflare 真实 IP 识别、可配置代理或公网直连、申请后空间列表重试确认、操作日志落盘，以及两个浏览器辅助按钮。
+`26.7.5R` 是当前版本，主线功能为：账号登录、命名白名单账号、白名单 WebSocket 空闲限时会话、账号会话数查询、启动时缓存 `k12.csv` 空间列表、自动忽略 CSV 表头、一次性工作台会话、WebSocket Origin 白名单、AT 查询、按邮箱后缀申请空间、重复申请前端拦截、申请前异常空间校验、申请后新增空间高亮提示、可选成功后停止申请、长申请流程保活、前端路径隐私脱敏、Cloudflare 真实 IP 识别、可配置代理或公网直连、申请后空间列表重试确认、操作日志落盘，以及两个浏览器辅助按钮。
 
 本版“打开网页”用于打开 ChatGPT session 地址；“退出空间”只打开 ChatGPT 账号设置入口并记录当前 workspace ID，不调用后端退出空间 API。
 
@@ -22,8 +22,9 @@ AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 - 登录账号存储在 SQLite：`db/auth.sqlite3`。
 - 密码使用 PBKDF2-HMAC-SHA256 加盐哈希，不明文保存。
 - 命名白名单账号 `im-run`、`linux.do` 无需密码即可查询和登录，仍会记录并显示有效 `remote` 与近 60 秒 RPM。
+- 白名单登录进入 WebSocket 后，普通连接累计空闲 600 秒前端主动断开，610 秒后端兜底断开；`Host=127.0.0.1` 或有效客户端 IP 为 `127.0.0.1` 时，累计空闲时间放宽到 1800/1810 秒；查询、申请等 RPC 任务执行期间不累计空闲时间。
 - 账号包含 `usable_count` 可用次数字段。
-- “查询”按钮校验账号密码后，前端显示有效 `remote`、近 60 秒请求次数 RPM 和账号可用次数。
+- “查询”按钮校验账号密码后，前端显示有效 `remote`、近 60 秒请求次数 RPM、当前账号 WebSocket 连接数、数据库活跃登录 session 数和账号可用次数。
 - 完整 headers 只记录到后端服务日志，不返回前端。
 - 请求事件写入 `db/auth.sqlite3`，当前按有效 `remote` 维度计算近 60 秒 RPM；Cloudflare 链路优先使用 `CF-Connecting-IP`，`X-Forwarded-For` 和 `X-Real-IP` 只保留在后端 headers 日志中，不作为判断 IP。
 - 登录成功后写入 `HttpOnly` Cookie：`k12_session`，并返回一次性工作台进入令牌；首页显示 3 秒后才允许手动点击“进入工作台”，不自动跳转。
@@ -44,7 +45,7 @@ AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 - 支持代理模式和无代理直连模式；`--k12-proxy none` 或 `--no-k12-proxy` 会让后端直连官方接口。
 - 保留 `curl.exe` 兜底版本：`server/k12_service_curl.py`、`try_join_first_curl.py`。
 - 空间 ID 支持 `workspace_id,plan_type,email_suffix,available` 行格式。
-- 前端按 AT 邮箱后缀匹配可用空间后才申请。
+- 前端按 AT 邮箱后缀匹配可用空间后才申请；第三列为空或 `*` 表示任意邮箱后缀。
 - 前端会检查当前账号已有 workspace ID，匹配空间已存在时不向后端提交申请。
 - 前端会检查当前 AT 的账号 ID 是否出现在待申请空间列表中；命中时提示“请用个人空间的AT进行申请”，但只跳过该 ID，其它候选空间继续申请。
 - 前端会检查查询结果是否出现 `deactivated_workspace`；命中时提示“请勿使用停用的空间进行申请”并禁用申请。
@@ -52,7 +53,7 @@ AT / RT 与纯 JS 页面说明见：`doc/AT_RT_GUIDE.md`。
 - “打开网页”按钮会打开 `https://chatgpt.com/api/auth/session`，用于浏览器侧检查 ChatGPT session。
 - “退出空间”按钮会基于当前查询到的 workspace 列表记录操作日志，并打开 ChatGPT 账号设置入口；当前不调用后端退出空间 API。
 - 后端会兜底规整 workspace 输入，只取 CSV 第一列 UUID。
-- 申请流程按顺序执行 `request -> accept`，首个 accept 成功后停止。
+- 申请流程按顺序执行 `request -> accept`；默认会继续尝试后续空间，勾选“成功后停止”后首个 accept 成功即停止。
 - 前端会对比申请前后的 workspace 列表；如果接口返回失败但刷新后出现新增空间，结果栏用绿色提示新增空间。
 - 新增空间日志会使用 `■■■【新增空间】■■■` 标记；因为操作日志是 `textarea`，无法对单行做富文本颜色。
 - HTTP 2xx 都按成功处理，避免 `204 No Content` 被误判失败。
@@ -230,16 +231,16 @@ Browser /html/websocket?entry=<entry_token>
 Browser /ws
   ├─ Origin 不在白名单：403 forbidden origin
   ├─ 未登录：401 login required
-  └─ 已登录：建立 WebSocket，收到 server.hello；每次 RPC 前重新校验 session
+  └─ 已登录：建立 WebSocket，收到 server.hello；每次 RPC 前重新校验 session；白名单会话普通连接累计空闲 600 秒前端断开、610 秒后端兜底断开，本地 127.0.0.1 连接为 1800/1810 秒
 ```
 
-当前版本只实现登录门槛、有效 remote 近 60 秒 RPM 统计和可用次数查询；尚未在每次申请成功后扣减可用次数。后续限流可基于 `auth_risk_fingerprints` 和 `auth_risk_events` 中的多维指纹数据接入。
+当前版本只实现登录门槛、有效 remote 近 60 秒 RPM 统计、账号会话数查询和可用次数查询；尚未在每次申请成功后扣减可用次数。后续限流可基于 `auth_risk_fingerprints` 和 `auth_risk_events` 中的多维指纹数据接入。
 
 ## WebSocket 版使用流程
 
 1. 打开 `/`，输入账号名和密码。
-2. 点击“查询”，查看当前 `remote`、近 60 秒 RPM 和账号可用次数。
-3. 点击“登录”，查看信息框中的 `remote`、近 60 秒 RPM 和可用次数。
+2. 点击“查询”，查看当前 `remote`、近 60 秒 RPM、账号会话数和账号可用次数。
+3. 点击“登录”，查看信息框中的 `remote`、近 60 秒 RPM、账号会话数和可用次数。
 4. 等待 3 秒后，手动点击“进入工作台”，携带一次性 `entry_token` 进入 `/html/websocket`。
 5. 可点击“打开网页”，打开 `https://chatgpt.com/api/auth/session` 检查浏览器侧 ChatGPT session。
 6. 输入 `eyJ...` 开头的 AccessToken。
@@ -249,7 +250,7 @@ Browser /ws
 10. 前端排除当前账号已存在的 workspace ID；如果匹配项全部已存在，不提交后端申请。
 11. 前端检查当前 AT 的账号 ID 是否被放进待申请空间列表；如果命中，提示“请用个人空间的AT进行申请”，并从待申请列表中跳过该 ID。
 12. 前端检查查询结果是否包含 `deactivated_workspace`；如果命中，提示“请勿使用停用的空间进行申请”并停止提交。
-13. 后端逐个执行 `request -> accept`，成功一个即停止。
+13. 后端逐个执行 `request -> accept`；默认继续尝试后续空间，勾选“成功后停止”后成功一个即停止。
 14. 申请后刷新空间列表；如果申请 ID 暂未出现，延迟 1 秒后重试，最多请求 3 次。
 15. 如果 `request` 表面失败但刷新后空间已出现，流程会标记为 `confirmed_after_refresh`。
 16. 前端会对比申请前后的 workspace 列表；如果出现新增空间，即使后端返回失败，结果栏也用绿色提示新增空间 ID。
@@ -265,6 +266,7 @@ k12.csv
 
 - 服务启动时读取一次 `k12.csv`，并缓存到内存。
 - 如果 `k12.csv` 包含 `workspace_id,...` 表头，缓存和下发内容会自动去掉表头。
+- 第三列邮箱后缀为空或 `*` 时，前端会视为任意邮箱后缀都可匹配。
 - `/api/auth/login` 成功响应会携带缓存内容字段 `workspace_csv`。
 - 首页前端将 `workspace_csv` 暂存到 `sessionStorage`，进入 `/html/websocket` 后填入空间 ID 输入框。
 - 修改 `k12.csv` 后需要重启服务才会生效。
@@ -297,8 +299,8 @@ GET  /html/websocket       WebSocket 后端版页面，需登录
 GET  /html/js              纯前端实验页
 GET  /api/status           服务状态，需登录
 GET  /api/auth/me          当前登录态
-POST /api/auth/query       查询账号并返回 remote、RPM 和可用次数
-POST /api/auth/login       登录并写入 session cookie，返回 entry_token
+POST /api/auth/query       查询账号并返回 remote、RPM、会话数和可用次数
+POST /api/auth/login       登录并写入 session cookie，返回 entry_token、会话数
 POST /api/auth/logout      退出登录
 GET  /ws                   WebSocket JSON-RPC，需登录且 Origin 在白名单
 ```
@@ -307,7 +309,7 @@ WebSocket JSON-RPC：
 
 ```text
 k12.inspect_at             查询 AT 账号信息并导出报告
-k12.apply_workspaces       按顺序申请空间，成功一个即停，刷新列表最多重试 3 次
+k12.apply_workspaces       按顺序申请空间，可选成功后停止，刷新列表最多重试 3 次
 k12.save_log               保存页面操作日志
 k12.latest                 读取最新 K12 查询报告
 server.status              查询服务状态
@@ -377,12 +379,13 @@ AT 查询摘要记录。
 - `python -B -m py_compile server/app.py server/auth_service.py server/k12_service.py tool/base_http_client.py tool/curl_cffi_client.py main.py`
 - 未登录访问 `/html/websocket` 返回 `302 /?session=expired`
 - 未登录连接 `/ws` 返回 `401`
-- `/api/auth/query` 不返回 headers，只返回 `remote`、近 60 秒 RPM 和可用次数
-- `/api/auth/login` 可写入登录态并返回一次性 `entry_token`
+- `/api/auth/query` 不返回 headers，只返回 `remote`、近 60 秒 RPM、会话数和可用次数
+- `/api/auth/login` 可写入登录态并返回一次性 `entry_token`、会话数
 - 登录后携带未消费的 `entry_token` 访问 `/html/websocket` 返回 `200`
 - 重复访问或刷新同一个 `/html/websocket?entry=...` 会删除 session 并返回首页
 - `/ws` 缺失 `Origin` 或 Origin 不在白名单时返回 `403`
 - `/ws` 携带白名单 Origin 且已登录时收到 `server.hello`
+- 白名单 WebSocket 会话收到 `server.hello.session.whitelist=true` 后按 `server.hello.session.client_timeout_seconds` 累计空闲断开；普通连接为 600/610 秒，本地 127.0.0.1 连接为 1800/1810 秒
 - 登录后连接 `/ws` 收到 `server.hello`
 - 纯 JS 页面不再包含浏览器 `fetch` 外部接口请求，只做 AT JWT payload 本地解析
 - 申请空间路径使用 `curl_cffi`
@@ -391,10 +394,43 @@ AT 查询摘要记录。
 
 ## 版本
 
-当前版本：`26.7.5L`
+当前版本：`26.7.5R`
 更新日期：`2026-07-05`
 
 ## 更新日志
+
+### 26.7.5R (2026-07-05)
+
+- 修复：长申请流程中不再使用 aiohttp WebSocket heartbeat，避免后端执行长 RPC 时未读取 pong 导致连接被判死。
+- 调整：申请空间 RPC 前端超时从固定 180 秒改为按候选数量动态计算，最少 10 分钟、最多 45 分钟。
+- 日志：WebSocket 断开日志增加 `close_code` 和异常信息，便于定位断开原因。
+
+### 26.7.5Q (2026-07-05)
+
+- 调整：普通白名单 WebSocket 空闲超时延长为 10 分钟，前端 600 秒主动断开，后端 610 秒兜底断开。
+- 新增：`Host=127.0.0.1` 或有效客户端 IP 为 `127.0.0.1` 的白名单 WebSocket 使用本地超时档，前端 1800 秒主动断开，后端 1810 秒兜底断开。
+- 协议：`server.hello.session` 增加 `timeout_profile`，当前值为 `default` 或 `local_127`。
+
+### 26.7.5P (2026-07-05)
+
+- 新增：WebSocket 工作台“申请空间”按钮左侧增加“成功后停止”复选框，默认不勾选。
+- 调整：默认申请流程会继续尝试后续空间；只有勾选“成功后停止”时，首个 accept 成功后才停止。
+- 协议：`k12.apply_workspaces` 增加 `stop_on_success` 参数，并返回 `accepted_workspace_ids`。
+
+### 26.7.5O (2026-07-05)
+
+- 修复：白名单 WebSocket 会话改为累计空闲计时，查询、申请、保存日志等 RPC 任务执行期间前端和后端都暂停计时。
+- 协议：`server.hello.session` 增加 `timeout_mode=idle`，表示超时时间只统计空闲状态。
+
+### 26.7.5N (2026-07-05)
+
+- 调整：白名单登录的 WebSocket 会话延长到 5 分钟，前端 300 秒主动断开，后端 310 秒兜底关闭。
+
+### 26.7.5M (2026-07-05)
+
+- 新增：白名单登录的 WebSocket 会话限时，前端 120 秒主动断开，后端 130 秒删除 session 并关闭连接。
+- 新增：`/api/auth/query`、`/api/auth/login`、`/api/auth/me` 和 `server.hello` 返回当前账号会话统计。
+- 新增：首页显示当前账号 WebSocket 连接数和数据库活跃登录 session 数。
 
 ### 26.7.5L (2026-07-05)
 

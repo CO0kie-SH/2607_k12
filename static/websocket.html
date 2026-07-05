@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>K12 空间申请</title>
-  <link rel="stylesheet" href="/static/style.css?v=260705-highlight-added" />
+  <link rel="stylesheet" href="/static/style.css?v=260705-stop-on-success" />
 </head>
 <body>
   <main class="page">
@@ -38,6 +38,10 @@
         <div class="panel-title">
           <h2>账号信息</h2>
           <div class="panel-actions">
+            <label class="checkbox-control" title="勾选后，申请成功一个空间就停止后续申请">
+              <input id="stop-on-success" type="checkbox" />
+              <span>成功后停止</span>
+            </label>
             <button id="reload-btn" class="inactive-btn" type="button" disabled>申请空间</button>
             <button id="leave-space-btn" class="secondary-btn" type="button">退出空间</button>
           </div>
@@ -56,6 +60,6 @@
       </article>
     </section>
   </main>
-  <script src="/static/websocket.js?v=260705-privacy-paths"></script>
+  <script src="/static/websocket.js?v=260705-long-apply-timeout"></script>
 </body>
 </html>
